@@ -1,0 +1,23 @@
+# Spider default pose placeholder.
+# 当前先统一使用 18 路 900（90.0°）作为学习阶段的中位姿态。
+default_pose:
+  frame_id: spider_base
+  angle_ddeg:
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900
+    - 900

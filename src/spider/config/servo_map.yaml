@@ -1,0 +1,58 @@
+# Spider servo channel mapping placeholder.
+# 当前先定义 18 路通道分别对应哪条腿的哪个关节，
+# 以后接真实舵机时再补具体编号和方向细节。
+servo_map:
+  - channel: 0
+    leg: lf
+    joint: coxa
+  - channel: 1
+    leg: lf
+    joint: femur
+  - channel: 2
+    leg: lf
+    joint: tibia
+  - channel: 3
+    leg: lm
+    joint: coxa
+  - channel: 4
+    leg: lm
+    joint: femur
+  - channel: 5
+    leg: lm
+    joint: tibia
+  - channel: 6
+    leg: lr
+    joint: coxa
+  - channel: 7
+    leg: lr
+    joint: femur
+  - channel: 8
+    leg: lr
+    joint: tibia
+  - channel: 9
+    leg: rf
+    joint: coxa
+  - channel: 10
+    leg: rf
+    joint: femur
+  - channel: 11
+    leg: rf
+    joint: tibia
+  - channel: 12
+    leg: rm
+    joint: coxa
+  - channel: 13
+    leg: rm
+    joint: femur
+  - channel: 14
+    leg: rm
+    joint: tibia
+  - channel: 15
+    leg: rr
+    joint: coxa
+  - channel: 16
+    leg: rr
+    joint: femur
+  - channel: 17
+    leg: rr
+    joint: tibia

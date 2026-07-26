@@ -1,0 +1,13 @@
+# Spider leg geometry placeholder.
+# 具体尺寸后续根据真实结构再确认，当前先把参数名字固定下来。
+# 本阶段新增最小六足静态组织参数，用来生成默认站立足端布局。
+leg_params:
+  coxa_length_mm: 0.0
+  femur_length_mm: 0.0
+  tibia_length_mm: 0.0
+  body_height_mm: 120.0
+  default_left_y_mm: 120.0
+  default_right_y_mm: -120.0
+  front_x_mm: 180.0
+  middle_x_mm: 120.0
+  rear_x_mm: -180.0
