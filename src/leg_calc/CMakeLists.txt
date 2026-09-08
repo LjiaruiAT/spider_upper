@@ -11,6 +11,7 @@ find_package(rclcpp REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(orocos_kdl REQUIRED)
 find_package(kdl_parser REQUIRED)
+find_package(robot_interfaces REQUIRED)
 
 add_executable(leg_calc_node
   src/main.cpp

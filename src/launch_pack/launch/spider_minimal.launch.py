@@ -11,6 +11,12 @@ def generate_launch_description():
             output='screen',
         ),
         Node(
+            package='leg_calc',
+            executable='leg_calc_node',
+            name='leg_calc_node',
+            output='screen',
+        ),
+        Node(
             package='robot_driver',
             executable='robot_driver_node',
             name='robot_driver_node',

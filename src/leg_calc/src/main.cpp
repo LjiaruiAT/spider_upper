@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <string>
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <kdl/chain.hpp>
 #include <kdl/frames.hpp>
@@ -12,6 +13,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <robot_interfaces/msg/servo18.hpp>
 
+#include "leg_calc/common_types.hpp"
 #include "leg_calc/leg_kinematics.hpp"
 #include "leg_calc/servo18_mapper.hpp"
 
@@ -104,21 +106,18 @@ const char* leg_name_cstr(leg_calc::LegId leg_id) {
 
 }  // namespace
 
-// 这是 leg_calc 的当前教学型数学核心节点：
-// 在保留单腿 IK/FK 验证价值的基础上，
-// 当前已经开始承担正式主链中的“数学层输出者”角色。
-// 当前会：
-// 1. 从 leg_params.yaml 读取最小静态布局参数
-// 2. 组织六条腿的默认足端目标点
-// 3. 逐条腿做 IK，汇总成 SpiderJointTargets
-// 4. 映射到 Servo18 兼容的 18 路数组
-// 5. 正式发布 /spider/servo_target 给 robot_driver
+// 这是 leg_calc 当前的数学装配节点：
+// 1. 从 spider/config 读取布局参数和舵机映射
+// 2. 生成身体坐标系下的六足默认足端目标
+// 3. 将身体坐标系目标转换为各腿局部坐标系
+// 4. 在单腿局部坐标系内做 IK/FK
+// 5. 映射为 Servo18 并发布给下游 driver
 class LegCalcNode : public rclcpp::Node {
 public:
     LegCalcNode()
         : Node("leg_calc_node"), sequence_(0) {
         RCLCPP_INFO(this->get_logger(), "leg_calc_node started");
-        RCLCPP_INFO(this->get_logger(), "Current stage: hexapod static organization skeleton + formal Servo18 output");
+        RCLCPP_INFO(this->get_logger(), "Current stage: explicit body frame -> leg frame -> IK -> Servo18");
 
         task_cmd_vel_subscription_ = this->create_subscription<geometry_msgs::msg::Twist>(
             "/spider/task_cmd_vel",
@@ -131,11 +130,13 @@ public:
         kinematics_ = std::make_shared<leg_calc::LegKinematics>(demo_chain_);
         kinematics_->set_position_offset(Eigen::Vector3d(0.0, 0.0, 0.0));
 
-        servo_map_path_ = "/home/liujiarui/Desktop/spider_upper/src/spider/config/servo_map.yaml";
-        leg_params_path_ = "/home/liujiarui/Desktop/spider_upper/src/spider/config/leg_params.yaml";
+        const auto spider_share = ament_index_cpp::get_package_share_directory("spider");
+        servo_map_path_ = spider_share + "/config/servo_map.yaml";
+        leg_params_path_ = spider_share + "/config/leg_params.yaml";
 
         layout_config_ = load_leg_layout_config(leg_params_path_);
         servo_map_ = leg_calc::Servo18Mapper::load_map_from_yaml(servo_map_path_);
+        frame_bundle_ = build_frame_bundle(layout_config_);
 
         RCLCPP_INFO(this->get_logger(), "Loaded leg layout from %s", leg_params_path_.c_str());
         RCLCPP_INFO(this->get_logger(), "Loaded servo_map from %s", servo_map_path_.c_str());
@@ -144,8 +145,8 @@ public:
     }
 
 private:
-    leg_calc::SpiderFootTargets build_static_foot_targets(const geometry_msgs::msg::Twist& task_cmd_vel) const {
-        leg_calc::SpiderFootTargets targets;
+    leg_calc::BodyFootTargets build_body_foot_targets(const geometry_msgs::msg::Twist& task_cmd_vel) const {
+        leg_calc::BodyFootTargets targets;
 
         const double x_shift = task_cmd_vel.linear.x * 0.05;
         const double y_shift = task_cmd_vel.linear.y * 0.05;
@@ -168,46 +169,54 @@ private:
     }
 
     leg_calc::SpiderJointTargets solve_static_joint_targets(
-        const leg_calc::SpiderFootTargets& foot_targets,
+        const leg_calc::BodyFootTargets& body_foot_targets,
         const std::string& tag) {
         leg_calc::SpiderJointTargets spider_targets;
 
         for (const auto leg_id : leg_calc::kAllLegIds) {
-            int ik_result = -1;
-            const Eigen::Vector3d& foot_target = foot_targets.feet[leg_calc::leg_index(leg_id)];
-            const auto joint_solution = kinematics_->inverse_position(foot_target, &ik_result);
-            const auto reconstructed_position = kinematics_->forward_position(joint_solution);
+            const auto index = leg_calc::leg_index(leg_id);
+            const auto& body_target = body_foot_targets.feet[index];
+            const auto& mount = frame_bundle_.leg_mounts[index];
+            const auto leg_target = leg_calc::body_point_to_leg_point(body_target, mount);
 
-            spider_targets.legs[leg_calc::leg_index(leg_id)].joints = joint_solution;
+            int ik_result = -1;
+            const auto joint_solution = kinematics_->inverse_position(leg_target, &ik_result);
+            const auto reconstructed_position = kinematics_->forward_position(joint_solution);
+            const auto reconstructed_body_position = leg_calc::leg_point_to_body_point(reconstructed_position, mount);
+
+            spider_targets.legs[index].joints = joint_solution;
 
             RCLCPP_INFO(
                 this->get_logger(),
-                "[%s] leg=%s target=[%.4f, %.4f, %.4f] ik=%d joints=[%.4f, %.4f, %.4f] fk=[%.4f, %.4f, %.4f]",
+                "[%s] leg=%s body_target=[%.4f, %.4f, %.4f] leg_target=[%.4f, %.4f, %.4f] ik=%d joints=[%.4f, %.4f, %.4f] fk_body=[%.4f, %.4f, %.4f]",
                 tag.c_str(),
                 leg_name_cstr(leg_id),
-                foot_target.x(),
-                foot_target.y(),
-                foot_target.z(),
+                body_target.x(),
+                body_target.y(),
+                body_target.z(),
+                leg_target.x(),
+                leg_target.y(),
+                leg_target.z(),
                 ik_result,
                 joint_solution(0),
                 joint_solution(1),
                 joint_solution(2),
-                reconstructed_position.x(),
-                reconstructed_position.y(),
-                reconstructed_position.z());
+                reconstructed_body_position.x(),
+                reconstructed_body_position.y(),
+                reconstructed_body_position.z());
         }
 
         return spider_targets;
     }
 
     void publish_servo_target(const std::string& tag) {
-        const auto foot_targets = build_static_foot_targets(latest_task_cmd_vel_);
-        const auto spider_targets = solve_static_joint_targets(foot_targets, tag);
+        const auto body_foot_targets = build_body_foot_targets(latest_task_cmd_vel_);
+        const auto spider_targets = solve_static_joint_targets(body_foot_targets, tag);
         const auto servo_angles = leg_calc::Servo18Mapper::to_angle_ddeg(spider_targets, servo_map_);
 
         robot_interfaces::msg::Servo18 msg;
         msg.header.stamp = this->now();
-        msg.header.frame_id = "spider_base";
+        msg.header.frame_id = frame_bundle_.body_frame.frame_id;
         msg.seq = sequence_++;
         msg.angle_ddeg = servo_angles;
         servo_target_publisher_->publish(msg);
@@ -267,6 +276,24 @@ private:
         return leg_calc::is_left_leg(leg_id) ? layout_config_.left_y_m : layout_config_.right_y_m;
     }
 
+    static leg_calc::SpiderFrameBundle build_frame_bundle(const StaticLayoutConfig& config) {
+        leg_calc::SpiderFrameBundle bundle;
+        bundle.body_frame.frame_id = "spider_base";
+
+        for (const auto leg_id : leg_calc::kAllLegIds) {
+            const auto index = leg_calc::leg_index(leg_id);
+            const Eigen::Vector3d origin(
+                (leg_id == leg_calc::LegId::LeftFront || leg_id == leg_calc::LegId::RightFront) ? config.front_x_m
+                : (leg_id == leg_calc::LegId::LeftMiddle || leg_id == leg_calc::LegId::RightMiddle) ? config.middle_x_m
+                                                                                                 : config.rear_x_m,
+                leg_calc::is_left_leg(leg_id) ? config.left_y_m : config.right_y_m,
+                0.0);
+            bundle.leg_mounts[index] = leg_calc::make_leg_mount_pose(leg_id, origin);
+        }
+
+        return bundle;
+    }
+
     static KDL::Chain build_demo_chain() {
         KDL::Chain chain;
         chain.addSegment(KDL::Segment(
@@ -291,6 +318,7 @@ private:
     uint8_t sequence_;
     geometry_msgs::msg::Twist latest_task_cmd_vel_{};
     StaticLayoutConfig layout_config_{};
+    leg_calc::SpiderFrameBundle frame_bundle_{};
     KDL::Chain demo_chain_;
     std::shared_ptr<leg_calc::LegKinematics> kinematics_;
     std::vector<leg_calc::ServoMapEntry> servo_map_{};
@@ -300,7 +328,7 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr task_cmd_vel_subscription_;
 };
 
-int main(int argc, char ** argv) {
+int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<LegCalcNode>();
     rclcpp::spin(node);
