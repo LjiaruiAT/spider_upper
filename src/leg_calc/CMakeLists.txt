@@ -15,6 +15,7 @@ find_package(robot_interfaces REQUIRED)
 
 add_executable(leg_calc_node
   src/main.cpp
+  src/foot_trajectory.cpp
   src/leg_kinematics.cpp
   src/servo18_mapper.cpp
 )
@@ -54,3 +55,4 @@ if(BUILD_TESTING)
 endif()
 
 ament_package()
+
