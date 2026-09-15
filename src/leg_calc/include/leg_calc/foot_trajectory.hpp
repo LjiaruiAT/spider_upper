@@ -7,9 +7,10 @@
 
 namespace leg_calc {
 
-// 足端轨迹生成器
-// 根据步态相位和身体速度，计算每条腿的足端目标位置
-// 输入和输出都以身体坐标系为主，后续再由 leg_calc 转到单腿局部坐标系做 IK。
+// 足端轨迹生成器。
+// 它是 IK 之前的一层：根据“当前是哪一相”和“身体想怎么动”，生成目标足端位置。
+// 输入和输出都以身体坐标系为主，之后由 leg_calc 转到单腿局部坐标系做 IK。
+// 注意：轨迹层只负责给出目标 p，不负责判断 p 是否可达，也不负责求关节角。
 class FootTrajectory {
 public:
     explicit FootTrajectory(const GaitConfig& config);

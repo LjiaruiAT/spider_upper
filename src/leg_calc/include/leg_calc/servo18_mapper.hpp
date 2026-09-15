@@ -9,6 +9,8 @@
 
 namespace leg_calc {
 
+// 单腿关节的语义名称和 JointVector 下标保持一致。
+// IK 输出的仍是弧度；这里的 mapper 只负责把它放到具体舵机通道。
 enum class JointId {
     Coxa = 0,
     Femur = 1,
@@ -29,6 +31,9 @@ struct ServoMapEntry {
     JointId joint_id{JointId::Coxa};
 };
 
+// 关节结果到 Servo18 的“执行器映射层”，不是运动学求解器。
+// 运动学输出每条腿的 [coxa, femur, tibia] 弧度；本类根据 YAML 把它们
+// 重新排列到 18 个舵机通道，并转换成协议使用的 0.1 度整数。
 class Servo18Mapper {
 public:
     static constexpr std::size_t kServoChannelCount = 18;

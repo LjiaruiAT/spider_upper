@@ -4,8 +4,9 @@
 
 namespace leg_calc {
 
-// 步态相位管理器
-// 根据时间和步态配置，计算六条腿当前的支撑/摆动相位
+// 步态相位管理器。
+// 根据离散时间推进 elapsed_，计算六条腿当前的支撑/摆动相位。
+// 它不直接计算足端坐标；它只提供 phase 和 phase_fraction，供 FootTrajectory 使用。
 class GaitPhaseManager {
 public:
     explicit GaitPhaseManager(const GaitConfig& config);

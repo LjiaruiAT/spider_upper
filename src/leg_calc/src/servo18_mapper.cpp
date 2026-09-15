@@ -8,6 +8,8 @@
 namespace leg_calc {
 
 std::vector<ServoMapEntry> Servo18Mapper::load_map_from_yaml(const std::string& yaml_path) {
+    // 这里把 YAML 中的“物理关节 -> 舵机通道”关系读入内存。
+    // 映射层不改变关节含义，只决定哪个腿的哪个关节写入哪个 Servo18 下标。
     std::ifstream input(yaml_path);
     if (!input.is_open()) {
         throw std::runtime_error("Failed to open servo map file: " + yaml_path);
@@ -70,12 +72,17 @@ std::vector<ServoMapEntry> Servo18Mapper::load_map_from_yaml(const std::string& 
 std::array<int16_t, Servo18Mapper::kServoChannelCount> Servo18Mapper::to_angle_ddeg(
     const SpiderJointTargets& targets,
     const std::vector<ServoMapEntry>& servo_map) {
+    // 输入角度是弧度，输出是 Servo18 协议的 0.1 度整数：
+    //   angle_ddeg = round(rad * 180/pi * 10)
+    // 因而 90 度会编码为 900。这里是单位/通道转换，不是 IK。
     std::array<int16_t, kServoChannelCount> angle_ddeg{};
 
     for (const auto& entry : servo_map) {
         if (entry.channel >= kServoChannelCount) {
             throw std::runtime_error("Servo map channel out of range");
         }
+        // 先用 leg_id 找到六腿数组，再用 joint_id 找到 [coxa,femur,tibia] 的列，
+        // 最后写入 YAML 指定的 Servo18 channel。
         const auto leg_index = static_cast<std::size_t>(entry.leg_id);
         const auto joint_index_value = joint_index(entry.joint_id);
         angle_ddeg[entry.channel] = radians_to_ddeg(targets.legs[leg_index].joints(static_cast<int>(joint_index_value)));
@@ -98,6 +105,7 @@ std::string Servo18Mapper::to_debug_string(const std::array<int16_t, kServoChann
 }
 
 int16_t Servo18Mapper::radians_to_ddeg(double rad) {
+    // 协议单位是 deci-degree（十分之一度），而运动学统一使用弧度。
     constexpr double kRadToDeg = 180.0 / M_PI;
     return static_cast<int16_t>(std::lround(rad * kRadToDeg * 10.0));
 }

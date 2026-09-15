@@ -16,6 +16,7 @@ find_package(robot_interfaces REQUIRED)
 add_executable(leg_calc_node
   src/main.cpp
   src/foot_trajectory.cpp
+  src/gait_phase_manager.cpp
   src/leg_kinematics.cpp
   src/servo18_mapper.cpp
 )

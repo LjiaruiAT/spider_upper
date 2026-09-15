@@ -1,5 +1,8 @@
+#include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -14,6 +17,8 @@
 #include <robot_interfaces/msg/servo18.hpp>
 
 #include "leg_calc/common_types.hpp"
+#include "leg_calc/foot_trajectory.hpp"
+#include "leg_calc/gait_phase_manager.hpp"
 #include "leg_calc/leg_kinematics.hpp"
 #include "leg_calc/servo18_mapper.hpp"
 
@@ -26,6 +31,20 @@ std::string trim(const std::string& text) {
     }
     const auto last = text.find_last_not_of(" \t");
     return text.substr(first, last - first + 1);
+}
+
+bool is_zero_command(const geometry_msgs::msg::Twist& cmd) {
+    constexpr double kEpsilon = 1e-6;
+    return std::fabs(cmd.linear.x) < kEpsilon &&
+           std::fabs(cmd.linear.y) < kEpsilon &&
+           std::fabs(cmd.angular.z) < kEpsilon;
+}
+
+leg_calc::BodyTwist to_body_twist(const geometry_msgs::msg::Twist& cmd) {
+    leg_calc::BodyTwist body_twist;
+    body_twist.linear = Eigen::Vector3d(cmd.linear.x, cmd.linear.y, 0.0);
+    body_twist.angular = Eigen::Vector3d(0.0, 0.0, cmd.angular.z);
+    return body_twist;
 }
 
 struct StaticLayoutConfig {
@@ -106,18 +125,36 @@ const char* leg_name_cstr(leg_calc::LegId leg_id) {
 
 }  // namespace
 
-// 这是 leg_calc 当前的数学装配节点：
-// 1. 从 spider/config 读取布局参数和舵机映射
-// 2. 生成身体坐标系下的六足默认足端目标
-// 3. 将身体坐标系目标转换为各腿局部坐标系
-// 4. 在单腿局部坐标系内做 IK/FK
-// 5. 映射为 Servo18 并发布给下游 driver
+// 这是 leg_calc 当前的数学装配节点。注意：IK 只是其中的“位置目标 -> 关节角”一步，
+// 前面还有步态相位和足端轨迹，后面还有关节到 Servo18 通道的映射：
+//
+//   cmd_vel
+//     -> gait phase
+//     -> foot trajectory（身体坐标系足端目标）
+//     -> body frame -> leg frame
+//     -> single-leg IK
+//     -> FK reconstruction（误差/一致性诊断）
+//     -> Servo18 mapping
+//
+// 当前 demo 的 KDL 链和六条腿几何还未完全替换为真实机械参数，详见 build_demo_chain
+// 和 solve_joint_targets 内的说明。
 class LegCalcNode : public rclcpp::Node {
 public:
     LegCalcNode()
-        : Node("leg_calc_node"), sequence_(0) {
+        : Node("leg_calc_node"),
+          sequence_(0),
+          gait_config_(),
+          gait_phase_manager_(gait_config_),
+          foot_trajectory_(gait_config_) {
         RCLCPP_INFO(this->get_logger(), "leg_calc_node started");
-        RCLCPP_INFO(this->get_logger(), "Current stage: explicit body frame -> leg frame -> IK -> Servo18");
+        RCLCPP_INFO(this->get_logger(), "Current stage: gait phase -> foot trajectory -> body frame -> leg frame -> IK -> Servo18");
+
+        declare_parameter<int>("control_period_ms", 20);
+        control_period_ms_ = this->get_parameter("control_period_ms").as_int();
+        if (control_period_ms_ <= 0) {
+            control_period_ms_ = 20;
+        }
+        control_period_sec_ = static_cast<double>(control_period_ms_) / 1000.0;
 
         task_cmd_vel_subscription_ = this->create_subscription<geometry_msgs::msg::Twist>(
             "/spider/task_cmd_vel",
@@ -138,55 +175,114 @@ public:
         servo_map_ = leg_calc::Servo18Mapper::load_map_from_yaml(servo_map_path_);
         frame_bundle_ = build_frame_bundle(layout_config_);
 
+        foot_trajectory_.update_config(gait_config_);
+        gait_phase_manager_.update_config(gait_config_);
+
+        control_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(control_period_ms_),
+            std::bind(&LegCalcNode::control_loop, this));
+
         RCLCPP_INFO(this->get_logger(), "Loaded leg layout from %s", leg_params_path_.c_str());
         RCLCPP_INFO(this->get_logger(), "Loaded servo_map from %s", servo_map_path_.c_str());
 
-        publish_servo_target("neutral");
+        publish_servo_target("neutral", build_nominal_body_targets());
     }
 
 private:
-    leg_calc::BodyFootTargets build_body_foot_targets(const geometry_msgs::msg::Twist& task_cmd_vel) const {
+    leg_calc::BodyFootTargets build_nominal_body_targets() const {
+        // 中性姿态的目标足端位置统一定义在身体坐标系：
+        //   x：前后，y：左右，z：身体下方为负（这里使用 -body_height_m）。
+        // 这些目标还不是 IK 的输入；solve_joint_targets 会根据每条腿的安装位姿
+        // 转换成相应的腿局部坐标，再交给同一个单腿运动学对象。
         leg_calc::BodyFootTargets targets;
 
-        const double x_shift = task_cmd_vel.linear.x * 0.05;
-        const double y_shift = task_cmd_vel.linear.y * 0.05;
-        const double turn_hint = task_cmd_vel.angular.z * 0.02;
-
         for (const auto leg_id : leg_calc::kAllLegIds) {
-            double x = layout_x_for_leg(leg_id) + x_shift;
-            double y = layout_y_for_leg(leg_id) + y_shift;
-
-            if (leg_id == leg_calc::LegId::LeftFront || leg_id == leg_calc::LegId::RightFront) {
-                x += turn_hint;
-            } else if (leg_id == leg_calc::LegId::LeftRear || leg_id == leg_calc::LegId::RightRear) {
-                x -= turn_hint;
-            }
-
-            targets.feet[leg_calc::leg_index(leg_id)] = Eigen::Vector3d(x, y, -layout_config_.body_height_m);
+            const auto index = leg_calc::leg_index(leg_id);
+            targets.feet[index] = Eigen::Vector3d(
+                layout_x_for_leg(leg_id),
+                layout_y_for_leg(leg_id),
+                -layout_config_.body_height_m);
         }
 
         return targets;
     }
 
-    leg_calc::SpiderJointTargets solve_static_joint_targets(
+    leg_calc::BodyFootTargets build_motion_body_targets(const leg_calc::BodyTwist& body_twist) {
+        // 先从站立时的名义足端位置开始，再由当前相位和身体速度生成运动目标。
+        // 因此 IK 每个周期看到的是一个随时间变化的身体坐标系点。
+        leg_calc::BodyFootTargets targets = build_nominal_body_targets();
+        const auto& gait_state = gait_phase_manager_.state();
+
+        for (const auto leg_id : leg_calc::kAllLegIds) {
+            const auto index = leg_calc::leg_index(leg_id);
+            const auto& nominal = targets.feet[index];
+            targets.feet[index] = foot_trajectory_.compute_foot_target(
+                leg_id,
+                nominal,
+                gait_state.phases[index],
+                gait_state.phase_fraction[index],
+                body_twist);
+        }
+
+        return targets;
+    }
+
+    void control_loop() {
+        const auto latest_cmd = snapshot_latest_task_cmd_vel();
+        const bool motion_active = !is_zero_command(latest_cmd);
+
+        if (motion_active && !motion_active_) {
+            gait_phase_manager_.reset();
+        } else if (!motion_active && motion_active_) {
+            gait_phase_manager_.reset();
+        }
+        motion_active_ = motion_active;
+
+        if (!motion_active) {
+            publish_servo_target("stand", build_nominal_body_targets());
+            return;
+        }
+
+        gait_phase_manager_.tick(control_period_sec_);
+        publish_servo_target("gait", build_motion_body_targets(to_body_twist(latest_cmd)));
+    }
+
+    geometry_msgs::msg::Twist snapshot_latest_task_cmd_vel() const {
+        std::lock_guard<std::mutex> lock(task_cmd_mutex_);
+        return latest_task_cmd_vel_;
+    }
+
+    leg_calc::SpiderJointTargets solve_joint_targets(
         const leg_calc::BodyFootTargets& body_foot_targets,
         const std::string& tag) {
+        // 每条腿的解算路径：
+        //   身体系目标 p_body
+        //     -> p_leg = body_T_leg^{-1} p_body
+        //     -> IK 求 q
+        //     -> FK 得到 p_leg_reconstructed
+        //     -> body_T_leg p_leg_reconstructed（仅用于日志诊断）
+        //
+        // 六条腿当前共用同一条 demo KDL chain；真正的机器人通常还需要根据
+        // 左右侧镜像、腿座方向和每条腿实际尺寸建立正确的链。
         leg_calc::SpiderJointTargets spider_targets;
 
         for (const auto leg_id : leg_calc::kAllLegIds) {
             const auto index = leg_calc::leg_index(leg_id);
             const auto& body_target = body_foot_targets.feet[index];
             const auto& mount = frame_bundle_.leg_mounts[index];
+            // KDL 链的根坐标系是这条腿的局部坐标系，所以身体系目标必须先逆变换。
             const auto leg_target = leg_calc::body_point_to_leg_point(body_target, mount);
 
             int ik_result = -1;
             const auto joint_solution = kinematics_->inverse_position(leg_target, &ik_result);
+            // FK 回代不是 IK 的第二次求解，而是检查 q 经正运动学后是否回到了目标点。
+            // reconstructed_body_position 只用于调试日志，当前没有用误差阈值拒绝结果。
             const auto reconstructed_position = kinematics_->forward_position(joint_solution);
             const auto reconstructed_body_position = leg_calc::leg_point_to_body_point(reconstructed_position, mount);
 
             spider_targets.legs[index].joints = joint_solution;
 
-            RCLCPP_INFO(
+            RCLCPP_DEBUG(
                 this->get_logger(),
                 "[%s] leg=%s body_target=[%.4f, %.4f, %.4f] leg_target=[%.4f, %.4f, %.4f] ik=%d joints=[%.4f, %.4f, %.4f] fk_body=[%.4f, %.4f, %.4f]",
                 tag.c_str(),
@@ -209,9 +305,8 @@ private:
         return spider_targets;
     }
 
-    void publish_servo_target(const std::string& tag) {
-        const auto body_foot_targets = build_body_foot_targets(latest_task_cmd_vel_);
-        const auto spider_targets = solve_static_joint_targets(body_foot_targets, tag);
+    void publish_servo_target(const std::string& tag, const leg_calc::BodyFootTargets& body_foot_targets) {
+        const auto spider_targets = solve_joint_targets(body_foot_targets, tag);
         const auto servo_angles = leg_calc::Servo18Mapper::to_angle_ddeg(spider_targets, servo_map_);
 
         robot_interfaces::msg::Servo18 msg;
@@ -221,39 +316,33 @@ private:
         msg.angle_ddeg = servo_angles;
         servo_target_publisher_->publish(msg);
 
-        RCLCPP_INFO(
+        RCLCPP_INFO_THROTTLE(
             this->get_logger(),
-            "[%s] task_cmd_vel=(%.3f, %.3f, %.3f)",
+            *this->get_clock(),
+            1000,
+            "[%s] body_frame=%s, task_cmd_vel=(%.3f, %.3f, %.3f), Servo18=%s",
             tag.c_str(),
+            frame_bundle_.body_frame.frame_id.c_str(),
             latest_task_cmd_vel_.linear.x,
             latest_task_cmd_vel_.linear.y,
-            latest_task_cmd_vel_.angular.z);
-        RCLCPP_INFO(
-            this->get_logger(),
-            "[%s] static layout body_height=%.3f m, left_y=%.3f m, right_y=%.3f m, front/mid/rear x=[%.3f, %.3f, %.3f] m",
-            tag.c_str(),
-            layout_config_.body_height_m,
-            layout_config_.left_y_m,
-            layout_config_.right_y_m,
-            layout_config_.front_x_m,
-            layout_config_.middle_x_m,
-            layout_config_.rear_x_m);
-        RCLCPP_INFO(this->get_logger(), "[%s] Publishing Servo18 angle_ddeg = %s", tag.c_str(), leg_calc::Servo18Mapper::to_debug_string(servo_angles).c_str());
+            latest_task_cmd_vel_.angular.z,
+            leg_calc::Servo18Mapper::to_debug_string(servo_angles).c_str());
     }
 
     void task_cmd_vel_callback(const geometry_msgs::msg::Twist::SharedPtr msg) {
-        latest_task_cmd_vel_ = *msg;
+        {
+            std::lock_guard<std::mutex> lock(task_cmd_mutex_);
+            latest_task_cmd_vel_ = *msg;
+        }
 
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
             1000,
             "Received /spider/task_cmd_vel in leg_calc: vx=%.3f, vy=%.3f, wz=%.3f",
-            latest_task_cmd_vel_.linear.x,
-            latest_task_cmd_vel_.linear.y,
-            latest_task_cmd_vel_.angular.z);
-
-        publish_servo_target("task_cmd_vel");
+            msg->linear.x,
+            msg->linear.y,
+            msg->angular.z);
     }
 
     double layout_x_for_leg(leg_calc::LegId leg_id) const {
@@ -295,6 +384,13 @@ private:
     }
 
     static KDL::Chain build_demo_chain() {
+        // 这里只是为了让数学链路可以运行的演示模型，不是真实蜘蛛腿参数：
+        //   joint1: RotZ  -> coxa/yaw，改变腿在水平面的方向
+        //   joint2: RotY  -> femur/pitch
+        //   joint3: RotY  -> tibia/knee
+        // 后面的无关节 segment 只提供固定末端几何偏移。
+        // 当前 leg_params.yaml 中的腿长还没有用于替换这些常量；因此不要把这里的
+        // IK 输出直接当作真实舵机安装角。后续应让真实链结构与机械图纸一致。
         KDL::Chain chain;
         chain.addSegment(KDL::Segment(
             "joint1",
@@ -316,6 +412,9 @@ private:
     }
 
     uint8_t sequence_;
+    leg_calc::GaitConfig gait_config_{};
+    leg_calc::GaitPhaseManager gait_phase_manager_;
+    leg_calc::FootTrajectory foot_trajectory_;
     geometry_msgs::msg::Twist latest_task_cmd_vel_{};
     StaticLayoutConfig layout_config_{};
     leg_calc::SpiderFrameBundle frame_bundle_{};
@@ -326,6 +425,11 @@ private:
     std::string leg_params_path_;
     rclcpp::Publisher<robot_interfaces::msg::Servo18>::SharedPtr servo_target_publisher_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr task_cmd_vel_subscription_;
+    rclcpp::TimerBase::SharedPtr control_timer_;
+    mutable std::mutex task_cmd_mutex_;
+    int control_period_ms_{20};
+    double control_period_sec_{0.02};
+    bool motion_active_{false};
 };
 
 int main(int argc, char** argv) {

@@ -1,4 +1,5 @@
 #include "leg_calc/gait_phase_manager.hpp"
+#include "leg_calc/common_types.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -19,8 +20,11 @@ GaitPhaseManager::GaitPhaseManager(const GaitConfig& config)
 }
 
 void GaitPhaseManager::tick(double dt_s) {
+    // elapsed_ 是步态时钟；每次控制周期推进一次。
     elapsed_ += dt_s;
 
+    // frequency_hz 表示一个完整全局周期每秒重复多少次。
+    // 最小值保护避免频率为 0 时除零；period_s 单位为秒。
     const double period_s = 1.0 / std::max(config_.frequency_hz, 0.01);
 
     switch (config_.pattern) {
@@ -54,7 +58,8 @@ void GaitPhaseManager::update_config(const GaitConfig& config) {
 }
 
 void GaitPhaseManager::update_tripod(double period_s) {
-    // 全局相位 [0, 1)，一个完整步态周期
+    // 把绝对时间折叠成一个周期内的无量纲相位：
+    //   global_phase = (elapsed / period) mod 1，范围 [0, 1)。
     state_.global_phase = std::fmod(elapsed_ / period_s, 1.0);
 
     // 三足步态：两个半周期
@@ -73,9 +78,10 @@ void GaitPhaseManager::update_tripod(double period_s) {
             state_.phases[i] = is_a ? LegPhase::Swing : LegPhase::Stance;
         }
 
-        // 计算在当前相位内的进度 [0, 1)
+        // 当前相位只占半个全局周期，所以要乘 2 拉伸回 [0, 1)。
+        // 这个 fraction 会直接作为 FootTrajectory 的插值参数。
         if (first_half) {
-            state_.phase_fraction[i] = state_.global_phase * 2.0;  // 拉伸到 [0, 1)
+            state_.phase_fraction[i] = state_.global_phase * 2.0;
         } else {
             state_.phase_fraction[i] = (state_.global_phase - 0.5) * 2.0;
         }
@@ -83,12 +89,15 @@ void GaitPhaseManager::update_tripod(double period_s) {
 }
 
 void GaitPhaseManager::update_wave(double period_s) {
-    // 波动步态：每次只有一条腿在摆动
-    // 六条腿按顺序依次摆动：LF → LM → LR → RR → RM → RF
+    // 波动步态：每次只有一条腿在摆动。
+    // 每条腿拥有一个长度为 1/6 的摆动窗口，其余时间为支撑相。
+    // 注意：这里的实际顺序由 LegId 数值索引决定，当前实现是 LF, LM, LR, RF, RM, RR；
+    // 注释中的工程期望顺序若要改变，需要同时修改 offset 计算或腿索引映射。
     state_.global_phase = std::fmod(elapsed_ / period_s, 1.0);
 
     for (std::size_t i = 0; i < kLegCount; ++i) {
-        // 每条腿的摆动窗口占 1/6 周期，偏移量不同
+        // leg_phase = (global_phase - leg_offset) mod 1，把不同腿的时间偏移折叠到 [0,1)。
+        // 摆动窗口长度是 1/6；窗口外的时间按比例映射成支撑相进度。
         const double leg_offset = static_cast<double>(i) / static_cast<double>(kLegCount);
         double leg_phase = std::fmod(state_.global_phase + 1.0 - leg_offset, 1.0);
 
@@ -104,8 +113,8 @@ void GaitPhaseManager::update_wave(double period_s) {
 }
 
 void GaitPhaseManager::update_ripple(double period_s) {
-    // 波纹步态：每次两条腿摆动
-    // 三组依次摆动：(LF+RR) → (LM+RM) → (LR+RF)
+    // 波纹步态：每次两条腿摆动；三组各占全局周期的 1/3。
+    // 组内腿共享同一个 leg_phase，因此会同步进入/离开摆动相。
     state_.global_phase = std::fmod(elapsed_ / period_s, 1.0);
 
     constexpr std::size_t kGroupCount = 3;
@@ -115,6 +124,7 @@ void GaitPhaseManager::update_ripple(double period_s) {
     constexpr std::size_t group_map[6] = {0, 1, 2, 2, 1, 0};
 
     for (std::size_t i = 0; i < kLegCount; ++i) {
+        // 对波纹步态也是同样的“偏移 -> 折叠 -> 判断摆动窗口”过程，只是三组共享偏移。
         const double group_offset = static_cast<double>(group_map[i]) / static_cast<double>(kGroupCount);
         double leg_phase = std::fmod(state_.global_phase + 1.0 - group_offset, 1.0);
 
