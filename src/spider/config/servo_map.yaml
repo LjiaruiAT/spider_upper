@@ -1,58 +1,110 @@
-# Spider servo channel mapping placeholder.
-# 当前先定义 18 路通道分别对应哪条腿的哪个关节，
-# 以后接真实舵机时再补具体编号和方向细节。
+# Spider servo channel map + per-servo calibration.
+#
+# 每一路包含三类信息：
+#   1. channel / leg / joint  语义映射：这个通道驱动哪条腿的哪个关节
+#   2. direction              标定：+1 或 -1，吃掉左右镜像 / 舵机安装方向
+#   3. offset_ddeg            标定：单位 0.1°，含义是"数学角为 0 时舵机应有的读数"
+#
+# 上位机映射公式（Servo18Mapper）：
+#   servo_ddeg = direction * math_ddeg + offset_ddeg
+# 再夹取到合法区间 [0, 1800]。
+#
+# 职责划分（见 工程现状总结.md 决策 D3）：
+#   - 标定由上位机负责，因此 /spider/servo_target 里发出去的就是"真实舵机角"；
+#   - 下位机 kServoMap 里的同名参数保持 direction=1 / offset=0 作为透传兜底，
+#     只保留硬夹取，不再重复标定。
+#
+# 注意：当前所有标定值都是"不标定"的默认状态，必须实机标定后再填写。
+#   - direction 先全部按 +1 填，哪一路方向反了就改成 -1；
+#   - offset_ddeg 按"数学角为 0 时量到的舵机读数"填。
 servo_map:
   - channel: 0
     leg: lf
     joint: coxa
+    direction: 1
+    offset_ddeg: 0
   - channel: 1
     leg: lf
     joint: femur
+    direction: 1
+    offset_ddeg: 0
   - channel: 2
     leg: lf
     joint: tibia
+    direction: 1
+    offset_ddeg: 0
   - channel: 3
     leg: lm
     joint: coxa
+    direction: 1
+    offset_ddeg: 0
   - channel: 4
     leg: lm
     joint: femur
+    direction: 1
+    offset_ddeg: 0
   - channel: 5
     leg: lm
     joint: tibia
+    direction: 1
+    offset_ddeg: 0
   - channel: 6
     leg: lr
     joint: coxa
+    direction: 1
+    offset_ddeg: 0
   - channel: 7
     leg: lr
     joint: femur
+    direction: 1
+    offset_ddeg: 0
   - channel: 8
     leg: lr
     joint: tibia
+    direction: 1
+    offset_ddeg: 0
   - channel: 9
     leg: rf
     joint: coxa
+    direction: 1
+    offset_ddeg: 0
   - channel: 10
     leg: rf
     joint: femur
+    direction: 1
+    offset_ddeg: 0
   - channel: 11
     leg: rf
     joint: tibia
+    direction: 1
+    offset_ddeg: 0
   - channel: 12
     leg: rm
     joint: coxa
+    direction: 1
+    offset_ddeg: 0
   - channel: 13
     leg: rm
     joint: femur
+    direction: 1
+    offset_ddeg: 0
   - channel: 14
     leg: rm
     joint: tibia
+    direction: 1
+    offset_ddeg: 0
   - channel: 15
     leg: rr
     joint: coxa
+    direction: 1
+    offset_ddeg: 0
   - channel: 16
     leg: rr
     joint: femur
+    direction: 1
+    offset_ddeg: 0
   - channel: 17
     leg: rr
     joint: tibia
+    direction: 1
+    offset_ddeg: 0

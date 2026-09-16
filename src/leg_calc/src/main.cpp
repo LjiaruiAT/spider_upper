@@ -33,6 +33,10 @@ std::string trim(const std::string& text) {
     return text.substr(first, last - first + 1);
 }
 
+// IK 回代误差容差（米）。IK 求出关节角 q 后，用同一条 KDL 链做 FK 应回到目标点；
+// 误差超过这个值说明"求解器返回了结果"但"结果没到目标"，属于必须报警的情况。
+constexpr double kIkErrorToleranceM = 1e-4;  // 0.1 mm
+
 bool is_zero_command(const geometry_msgs::msg::Twist& cmd) {
     constexpr double kEpsilon = 1e-6;
     return std::fabs(cmd.linear.x) < kEpsilon &&
@@ -266,6 +270,12 @@ private:
         // 左右侧镜像、腿座方向和每条腿实际尺寸建立正确的链。
         leg_calc::SpiderJointTargets spider_targets;
 
+        // 回代诊断统计。solve_joint_targets() 每个控制周期都会被调用（默认 20ms），
+        // 所以不能对每条腿各打一条 WARN，否则日志会被刷爆；这里先统计，循环结束后汇总一条。
+        std::size_t ik_error_count = 0;
+        std::size_t error_exceed_count = 0;
+        double max_error_norm = 0.0;
+
         for (const auto leg_id : leg_calc::kAllLegIds) {
             const auto index = leg_calc::leg_index(leg_id);
             const auto& body_target = body_foot_targets.feet[index];
@@ -276,15 +286,27 @@ private:
             int ik_result = -1;
             const auto joint_solution = kinematics_->inverse_position(leg_target, &ik_result);
             // FK 回代不是 IK 的第二次求解，而是检查 q 经正运动学后是否回到了目标点。
-            // reconstructed_body_position 只用于调试日志，当前没有用误差阈值拒绝结果。
             const auto reconstructed_position = kinematics_->forward_position(joint_solution);
             const auto reconstructed_body_position = leg_calc::leg_point_to_body_point(reconstructed_position, mount);
+
+            // 回代误差在"腿坐标系"下比较，因为 IK 的目标点正是这个坐标系下的 leg_target。
+            // LegKinematics 内部对 position_offset_ 的处理在 IK/FK 两边是对称的，
+            // 所以这里直接用 reconstructed_position - leg_target，不需要再补偏移。
+            // 当前只统计和报警，失败解仍然会被写入输出（拒绝策略是下一个主题）。
+            const double error_norm = (reconstructed_position - leg_target).norm();
+            max_error_norm = std::max(max_error_norm, error_norm);
+            if (ik_result < 0) {
+                ++ik_error_count;
+            }
+            if (error_norm > kIkErrorToleranceM) {
+                ++error_exceed_count;
+            }
 
             spider_targets.legs[index].joints = joint_solution;
 
             RCLCPP_DEBUG(
                 this->get_logger(),
-                "[%s] leg=%s body_target=[%.4f, %.4f, %.4f] leg_target=[%.4f, %.4f, %.4f] ik=%d joints=[%.4f, %.4f, %.4f] fk_body=[%.4f, %.4f, %.4f]",
+                "[%s] leg=%s body_target=[%.4f, %.4f, %.4f] leg_target=[%.4f, %.4f, %.4f] ik=%d err=%.2fmm joints=[%.4f, %.4f, %.4f] fk_body=[%.4f, %.4f, %.4f]",
                 tag.c_str(),
                 leg_name_cstr(leg_id),
                 body_target.x(),
@@ -294,6 +316,7 @@ private:
                 leg_target.y(),
                 leg_target.z(),
                 ik_result,
+                error_norm * 1000.0,
                 joint_solution(0),
                 joint_solution(1),
                 joint_solution(2),
@@ -302,12 +325,52 @@ private:
                 reconstructed_body_position.z());
         }
 
+        // 只要有腿 IK 报错、或有腿回代误差超出容差，就汇总打一条 WARN。
+        // WARN_THROTTLE 保证 50Hz 控制循环下日志不会刷屏，但问题会持续可见。
+        if (ik_error_count > 0 || error_exceed_count > 0) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "[%s] IK 回代诊断异常: ik_result<0 的有 %zu/%zu 腿, FK 回代误差超过 %.2fmm 的有 %zu/%zu 腿, 最大误差=%.2f mm",
+                tag.c_str(),
+                ik_error_count,
+                leg_calc::kLegCount,
+                kIkErrorToleranceM * 1000.0,
+                error_exceed_count,
+                leg_calc::kLegCount,
+                max_error_norm * 1000.0);
+        } else {
+            RCLCPP_DEBUG(
+                this->get_logger(),
+                "[%s] IK 回代诊断正常: 最大误差=%.4f mm",
+                tag.c_str(),
+                max_error_norm * 1000.0);
+        }
+
         return spider_targets;
     }
 
     void publish_servo_target(const std::string& tag, const leg_calc::BodyFootTargets& body_foot_targets) {
         const auto spider_targets = solve_joint_targets(body_foot_targets, tag);
-        const auto servo_angles = leg_calc::Servo18Mapper::to_angle_ddeg(spider_targets, servo_map_);
+        // 映射层输出的是"真实舵机角"（0~1800），标定参数来自 servo_map.yaml。
+        const auto mapping = leg_calc::Servo18Mapper::to_angle_ddeg(spider_targets, servo_map_);
+        const auto& servo_angles = mapping.angle_ddeg;
+
+        // 越界说明 IK 解出的角度或标定参数有问题。在真机上，这就是"舵机顶死"，
+        // 所以必须报出来，而不是让它静默地被夹取掉。
+        if (mapping.out_of_range_count > 0) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "[%s] 标定后有 %zu/%zu 路角度超出合法区间 [%d, %d]，已夹取；请检查 IK 结果或 servo_map 标定参数",
+                tag.c_str(),
+                mapping.out_of_range_count,
+                leg_calc::Servo18Mapper::kServoChannelCount,
+                leg_calc::Servo18Mapper::kServoMinDdeg,
+                leg_calc::Servo18Mapper::kServoMaxDdeg);
+        }
 
         robot_interfaces::msg::Servo18 msg;
         msg.header.stamp = this->now();
