@@ -15,13 +15,25 @@ class FootTrajectory {
 public:
     explicit FootTrajectory(const GaitConfig& config);
 
-    // 计算单腿在当前步态状态下的足端目标（身体坐标系）
+    // 计算单腿在当前步态状态下的足端目标（身体坐标系）。
+    //
+    // motion_scale ∈ [0, 1] 是"运动强度"，用于起步 / 停步过渡：
+    //   0 = 完全站立：足端在**所有相位、所有 phase_fraction** 下都严格等于 nominal_foot
+    //   1 = 全速步态
+    //
+    // 它同时缩放三样东西：水平位移、转角、以及**抬腿高度**。
+    // 最后一项是必须的——否则强度降到 0 时摆动腿仍停在空中，
+    // 切回站立姿态的瞬间会出现垂直跳变（实测可达 30mm）。
+    //
+    // 这个参数的作用是让 stand 与 gait 的输出在 scale = 0 处**完全重合**，
+    // 于是两者之间可以无缝切换，不需要任何边界检测或状态对齐。
     Eigen::Vector3d compute_foot_target(
         LegId leg_id,
         const Eigen::Vector3d& nominal_foot,
         LegPhase phase,
         double phase_fraction,
-        const BodyTwist& body_twist);
+        const BodyTwist& body_twist,
+        double motion_scale = 1.0);
 
     // 运行时更新步态配置（步长上限、高度等）
     void update_config(const GaitConfig& config) {
@@ -45,14 +57,16 @@ private:
         LegId leg_id,
         const Eigen::Vector3d& nominal,
         double fraction,
-        const BodyTwist& body_twist);
+        const BodyTwist& body_twist,
+        double motion_scale);
 
     // 摆动相轨迹：摆线弧线，抬腿→前移→落地
     Eigen::Vector3d swing_trajectory(
         LegId leg_id,
         const Eigen::Vector3d& nominal,
         double fraction,
-        const BodyTwist& body_twist);
+        const BodyTwist& body_twist,
+        double motion_scale);
 
     GaitConfig config_;
 };

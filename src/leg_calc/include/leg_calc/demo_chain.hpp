@@ -24,4 +24,18 @@ namespace leg_calc {
 // 否则测试验证的就不是实际运行时的那条几何。
 KDL::Chain build_demo_chain();
 
+// demo 链的径向可达区间（米），对应 LegKinematics::set_reach_limits()。
+//
+// 推导（详见 工程现状总结.md 5.3 节）：
+//   joint3 的平移 [0.12, 0, -0.02] 和 foot 的平移 [0.10, 0, -0.10] 之间没有关节，
+//   是刚性相连的，合并后长度 = |[0.22, 0, -0.12]| = 0.250599 m；
+//   第一段长度 0.06 m。两个向量反向 => 最小可达 0.250599 − 0.06 = 0.190599 m；
+//   同向 => 最大可达 0.250599 + 0.06 = 0.310599 m。
+//   q0 绕 z 轴旋转把这段区间扫成一个**球壳**，所以可达性可以用半径判断。
+//
+// 改链里的任何一个常量，这两个值都必须重算。
+// test_leg_kinematics.cpp 会用密集采样 FK 验证它们与链保持一致，忘了改会被测试拦下。
+inline constexpr double kDemoChainMinReachM = 0.190599282;
+inline constexpr double kDemoChainMaxReachM = 0.310599282;
+
 }  // namespace leg_calc

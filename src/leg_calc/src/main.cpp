@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -34,6 +35,10 @@ std::string trim(const std::string& text) {
 // IK 回代误差容差（米）。IK 求出关节角 q 后，用同一条 KDL 链做 FK 应回到目标点；
 // 误差超过这个值说明"求解器返回了结果"但"结果没到目标"，属于必须报警的情况。
 constexpr double kIkErrorToleranceM = 1e-4;  // 0.1 mm
+
+// 判断"命令是否超出能力上限"时的容差：速度命令和上限都是浮点数，
+// 两者恰好相等时不应该被报成超限。
+constexpr double kCommandEpsilon = 1e-6;
 
 bool is_zero_command(const geometry_msgs::msg::Twist& cmd) {
     constexpr double kEpsilon = 1e-6;
@@ -106,6 +111,78 @@ StaticLayoutConfig load_leg_layout_config(const std::string& yaml_path) {
     return config;
 }
 
+// 关节限位配置，单位：度（来自 YAML）。使用前会转成弧度。
+struct JointLimitsConfig {
+    double coxa_min_deg{-90.0};
+    double coxa_max_deg{90.0};
+    double femur_min_deg{-60.0};
+    double femur_max_deg{60.0};
+    double tibia_min_deg{-30.0};
+    double tibia_max_deg{150.0};
+};
+
+JointLimitsConfig load_joint_limits_config(const std::string& yaml_path) {
+    std::ifstream input(yaml_path);
+    if (!input.is_open()) {
+        throw std::runtime_error("Failed to open leg params file: " + yaml_path);
+    }
+
+    JointLimitsConfig config;
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::string trimmed = trim(line);
+        if (trimmed.empty() || trimmed[0] == '#') {
+            continue;
+        }
+
+        auto parse_deg_value = [&](const std::string& key, double& target) {
+            if (trimmed.rfind(key, 0) == 0) {
+                target = std::stod(trim(trimmed.substr(key.size())));
+                return true;
+            }
+            return false;
+        };
+
+        if (trimmed == "leg_params:") {
+            continue;
+        }
+        if (parse_deg_value("coxa_min_deg:", config.coxa_min_deg)) {
+            continue;
+        }
+        if (parse_deg_value("coxa_max_deg:", config.coxa_max_deg)) {
+            continue;
+        }
+        if (parse_deg_value("femur_min_deg:", config.femur_min_deg)) {
+            continue;
+        }
+        if (parse_deg_value("femur_max_deg:", config.femur_max_deg)) {
+            continue;
+        }
+        if (parse_deg_value("tibia_min_deg:", config.tibia_min_deg)) {
+            continue;
+        }
+        if (parse_deg_value("tibia_max_deg:", config.tibia_max_deg)) {
+            continue;
+        }
+    }
+
+    return config;
+}
+
+leg_calc::JointLimits to_joint_limits(const JointLimitsConfig& config) {
+    constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+    leg_calc::JointLimits limits;
+    limits.min = leg_calc::JointVector(
+        config.coxa_min_deg * kDegToRad,
+        config.femur_min_deg * kDegToRad,
+        config.tibia_min_deg * kDegToRad);
+    limits.max = leg_calc::JointVector(
+        config.coxa_max_deg * kDegToRad,
+        config.femur_max_deg * kDegToRad,
+        config.tibia_max_deg * kDegToRad);
+    return limits;
+}
+
 const char* leg_name_cstr(leg_calc::LegId leg_id) {
     switch (leg_id) {
     case leg_calc::LegId::LeftFront:
@@ -158,6 +235,15 @@ public:
         }
         control_period_sec_ = static_cast<double>(control_period_ms_) / 1000.0;
 
+        // 起步 / 停步时"运动强度"从 0 到 1（或反向）过渡所需的秒数。
+        // 曲线用五次多项式生成，两端的速度和加速度都是 0，所以不会产生冲击。
+        // 建议至少覆盖 2 个步态周期，否则腿还没走完一步就被加速/减速。
+        declare_parameter<double>("motion_ramp_duration_sec", 1.0);
+        motion_ramp_duration_sec_ = this->get_parameter("motion_ramp_duration_sec").as_double();
+        if (motion_ramp_duration_sec_ <= 0.0) {
+            motion_ramp_duration_sec_ = 1.0;
+        }
+
         task_cmd_vel_subscription_ = this->create_subscription<geometry_msgs::msg::Twist>(
             "/spider/task_cmd_vel",
             10,
@@ -168,17 +254,37 @@ public:
         demo_chain_ = leg_calc::build_demo_chain();
         kinematics_ = std::make_shared<leg_calc::LegKinematics>(demo_chain_);
         kinematics_->set_position_offset(Eigen::Vector3d(0.0, 0.0, 0.0));
+        // 径向可达区间来自链几何（推导见 demo_chain.hpp）：
+        // 目标点落在这个球壳之外时 IK 一定无解，可以在调用求解器前直接拒绝，
+        // 省掉一次注定失败的数值迭代。
+        kinematics_->set_reach_limits(leg_calc::kDemoChainMinReachM, leg_calc::kDemoChainMaxReachM);
 
         const auto spider_share = ament_index_cpp::get_package_share_directory("spider");
         servo_map_path_ = spider_share + "/config/servo_map.yaml";
         leg_params_path_ = spider_share + "/config/leg_params.yaml";
 
         layout_config_ = load_leg_layout_config(leg_params_path_);
+        joint_limits_ = to_joint_limits(load_joint_limits_config(leg_params_path_));
         servo_map_ = leg_calc::Servo18Mapper::load_map_from_yaml(servo_map_path_);
         frame_bundle_ = build_frame_bundle(layout_config_);
 
         foot_trajectory_.update_config(gait_config_);
         gait_phase_manager_.update_config(gait_config_);
+
+        // 把"参数是否自洽"显式打出来：步长上限 + 步态频率 + 支撑相占比三者一确定，
+        // 能支持的最大速度也就确定了。命令超过它时机器人**不会更快**，
+        // 只是命令与现实脱节——所以这个数字必须一开始就可见。
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Gait capability: pattern=%d, frequency=%.2f Hz, stance_duration=%.3f s, "
+            "step_limit=%.1f mm -> max_speed=%.3f m/s, max_lateral=%.3f m/s, max_turn=%.3f rad/s",
+            static_cast<int>(gait_config_.pattern),
+            gait_config_.frequency_hz,
+            leg_calc::stance_duration_s(gait_config_),
+            gait_config_.step_length_m * 1000.0,
+            leg_calc::max_forward_speed_mps(gait_config_),
+            leg_calc::max_lateral_speed_mps(gait_config_),
+            leg_calc::max_turn_rate_rps(gait_config_));
 
         control_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(control_period_ms_),
@@ -186,8 +292,19 @@ public:
 
         RCLCPP_INFO(this->get_logger(), "Loaded leg layout from %s", leg_params_path_.c_str());
         RCLCPP_INFO(this->get_logger(), "Loaded servo_map from %s", servo_map_path_.c_str());
+        RCLCPP_INFO(
+            this->get_logger(),
+            "链路校验: 可达半径 [%.1f, %.1f] mm, 关节限位(deg) coxa[%.0f,%.0f] femur[%.0f,%.0f] tibia[%.0f,%.0f]",
+            kinematics_->min_reach_m() * 1000.0,
+            kinematics_->max_reach_m() * 1000.0,
+            joint_limits_.min(0) * 180.0 / 3.14159265358979323846,
+            joint_limits_.max(0) * 180.0 / 3.14159265358979323846,
+            joint_limits_.min(1) * 180.0 / 3.14159265358979323846,
+            joint_limits_.max(1) * 180.0 / 3.14159265358979323846,
+            joint_limits_.min(2) * 180.0 / 3.14159265358979323846,
+            joint_limits_.max(2) * 180.0 / 3.14159265358979323846);
 
-        publish_servo_target("neutral", build_nominal_body_targets());
+        publish_servo_target("neutral", build_nominal_body_targets(), 0.0);
     }
 
 private:
@@ -209,9 +326,15 @@ private:
         return targets;
     }
 
-    leg_calc::BodyFootTargets build_motion_body_targets(const leg_calc::BodyTwist& body_twist) {
+    leg_calc::BodyFootTargets build_motion_body_targets(
+        const leg_calc::BodyTwist& body_twist,
+        double motion_scale) {
         // 先从站立时的名义足端位置开始，再由当前相位和身体速度生成运动目标。
         // 因此 IK 每个周期看到的是一个随时间变化的身体坐标系点。
+        //
+        // motion_scale 是"运动强度"：0 时六条腿全部等于站姿（起步/停步过渡），
+        // 1 时是全速步态。它同时缩放位移、转角和抬腿高度，
+        // 这样 stand 与 gait 的输出在 scale = 0 处完全重合。
         leg_calc::BodyFootTargets targets = build_nominal_body_targets();
         const auto& gait_state = gait_phase_manager_.state();
 
@@ -223,7 +346,8 @@ private:
                 nominal,
                 gait_state.phases[index],
                 gait_state.phase_fraction[index],
-                body_twist);
+                body_twist,
+                motion_scale);
         }
 
         return targets;
@@ -231,22 +355,76 @@ private:
 
     void control_loop() {
         const auto latest_cmd = snapshot_latest_task_cmd_vel();
-        const bool motion_active = !is_zero_command(latest_cmd);
+        const bool wants_motion = !is_zero_command(latest_cmd);
 
-        if (motion_active && !motion_active_) {
-            gait_phase_manager_.reset();
-        } else if (!motion_active && motion_active_) {
-            gait_phase_manager_.reset();
-        }
-        motion_active_ = motion_active;
+        // 运动强度过渡：起步时 0 -> 1，停步时 1 -> 0，曲线用五次多项式。
+        //
+        // 这里**不需要**任何"进入/退出运动"的边界检测：motion_scale = 0 时
+        // 足端在所有相位下都严格等于站立姿态，gait 与 stand 的输出在这个点上
+        // 完全重合，所以两者之间的切换本来就不会跳。
+        const double ramp_direction = wants_motion ? 1.0 : -1.0;
+        ramp_progress_ = std::clamp(
+            ramp_progress_ + ramp_direction * control_period_sec_ / motion_ramp_duration_sec_,
+            0.0,
+            1.0);
+        const double motion_scale = leg_calc::quintic_ease(ramp_progress_);
 
-        if (!motion_active) {
-            publish_servo_target("stand", build_nominal_body_targets());
+        // 已经彻底停下：回到标称站姿，并把步态相位复位，让下次起步总从相位 0 开始。
+        // 此时 motion_scale 已经是 0，步态输出本来就等于站姿，这个切换是无缝的。
+        if (!wants_motion && ramp_progress_ <= 0.0) {
+            gait_phase_manager_.reset();
+            publish_servo_target("stand", build_nominal_body_targets(), 0.0);
             return;
         }
 
+        // 停步过程中必须继续用**最后一条有效速度命令**，而不是当前的零命令。
+        //
+        // 因为轨迹层的位移 = 速度 × 支撑相时长：命令一旦变成 0，步长立刻归零，
+        // 足端会在一个控制周期内塌回标称站姿（实测水平跳变 20mm），
+        // 而这时 motion_scale 还接近 1，根本来不及起作用。
+        // 正确的减速过程是"速度不变，把运动强度逐渐降到 0"。
+        if (wants_motion) {
+            last_motion_cmd_ = latest_cmd;
+            warn_if_command_exceeds_capability(latest_cmd);
+        }
+        const geometry_msgs::msg::Twist motion_cmd = wants_motion ? latest_cmd : last_motion_cmd_;
+
         gait_phase_manager_.tick(control_period_sec_);
-        publish_servo_target("gait", build_motion_body_targets(to_body_twist(latest_cmd)));
+        publish_servo_target(
+            wants_motion ? "gait" : "gait_stop",
+            build_motion_body_targets(to_body_twist(motion_cmd), motion_scale),
+            motion_scale);
+    }
+
+    // 命令速度超过当前步态参数所能支持的上限时，轨迹层会把步长夹住：
+    // 机器人不会按该速度运动，只是命令与现实脱节。必须报出来，
+    // 否则你会以为它真的在按 0.2 m/s 走。
+    // 注意不能声明为 const：RCLCPP_*_THROTTLE 需要非 const 的 rclcpp::Clock。
+    void warn_if_command_exceeds_capability(const geometry_msgs::msg::Twist& cmd) {
+        const double max_vx = leg_calc::max_forward_speed_mps(gait_config_);
+        const double max_vy = leg_calc::max_lateral_speed_mps(gait_config_);
+        const double max_wz = leg_calc::max_turn_rate_rps(gait_config_);
+
+        const bool within_capability =
+            std::fabs(cmd.linear.x) <= max_vx + kCommandEpsilon &&
+            std::fabs(cmd.linear.y) <= max_vy + kCommandEpsilon &&
+            std::fabs(cmd.angular.z) <= max_wz + kCommandEpsilon;
+        if (within_capability) {
+            return;
+        }
+
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            1000,
+            "命令超出当前步态参数能力：cmd=(%.3f, %.3f, %.3f)，上限=(%.3f, %.3f, %.3f)。"
+            "步长已被夹取，机器人不会按该速度运动；请提高步态频率或放宽步长上限。",
+            cmd.linear.x,
+            cmd.linear.y,
+            cmd.angular.z,
+            max_vx,
+            max_vy,
+            max_wz);
     }
 
     geometry_msgs::msg::Twist snapshot_latest_task_cmd_vel() const {
@@ -260,18 +438,23 @@ private:
         // 每条腿的解算路径：
         //   身体系目标 p_body
         //     -> p_leg = body_T_leg^{-1} p_body
-        //     -> IK 求 q
-        //     -> FK 得到 p_leg_reconstructed
-        //     -> body_T_leg p_leg_reconstructed（仅用于日志诊断）
+        //     -> ① 径向可达性预判（超出球壳直接拒绝，不必让求解器白迭代）
+        //     -> ② IK 求 q
+        //     -> ③ FK 回代，用误差判断这个解可不可信
+        //     -> ④ 关节限位校验
+        //     -> 不可信则保留上一条可信解
         //
         // 六条腿当前共用同一条 demo KDL chain；真正的机器人通常还需要根据
         // 左右侧镜像、腿座方向和每条腿实际尺寸建立正确的链。
         leg_calc::SpiderJointTargets spider_targets;
 
-        // 回代诊断统计。solve_joint_targets() 每个控制周期都会被调用（默认 20ms），
+        // 诊断统计。solve_joint_targets() 每个控制周期都会被调用（默认 20ms），
         // 所以不能对每条腿各打一条 WARN，否则日志会被刷爆；这里先统计，循环结束后汇总一条。
+        std::size_t unreachable_count = 0;
+        std::size_t out_of_limit_count = 0;
         std::size_t ik_error_count = 0;
-        std::size_t error_exceed_count = 0;
+        std::size_t rejected_count = 0;
+        std::size_t never_solved_count = 0;
         double max_error_norm = 0.0;
 
         for (const auto leg_id : leg_calc::kAllLegIds) {
@@ -280,68 +463,96 @@ private:
             const auto& mount = frame_bundle_.leg_mounts[index];
             // KDL 链的根坐标系是这条腿的局部坐标系，所以身体系目标必须先逆变换。
             const auto leg_target = leg_calc::body_point_to_leg_point(body_target, mount);
+            const auto& last_trusted = last_trusted_joints_[index];
 
+            // ① 径向可达性预判：够不着就不必调用求解器。
+            if (!kinematics_->is_within_reach(leg_target)) {
+                ++unreachable_count;
+                ++rejected_count;
+                spider_targets.legs[index].joints = last_trusted;
+                continue;
+            }
+
+            // ② 数值 IK
             int ik_result = -1;
             const auto joint_solution = kinematics_->inverse_position(leg_target, &ik_result);
-            // FK 回代不是 IK 的第二次求解，而是检查 q 经正运动学后是否回到了目标点。
+            // FK 回代不是第二次求解，而是检查 q 经正运动学后是否回到了目标点。
             const auto reconstructed_position = kinematics_->forward_position(joint_solution);
-            const auto reconstructed_body_position = leg_calc::leg_point_to_body_point(reconstructed_position, mount);
 
             // 回代误差在"腿坐标系"下比较，因为 IK 的目标点正是这个坐标系下的 leg_target。
             // LegKinematics 内部对 position_offset_ 的处理在 IK/FK 两边是对称的，
             // 所以这里直接用 reconstructed_position - leg_target，不需要再补偏移。
-            // 当前只统计和报警，失败解仍然会被写入输出（拒绝策略是下一个主题）。
             const double error_norm = (reconstructed_position - leg_target).norm();
             max_error_norm = std::max(max_error_norm, error_norm);
             if (ik_result < 0) {
                 ++ik_error_count;
             }
-            if (error_norm > kIkErrorToleranceM) {
-                ++error_exceed_count;
+
+            // ③ 关节限位：数值上收敛不等于机械上转得到。
+            const bool within_limits = joint_limits_.contains(joint_solution);
+            if (!within_limits) {
+                ++out_of_limit_count;
             }
 
-            spider_targets.legs[index].joints = joint_solution;
+            // ④ 判据是 FK 回代误差，不是 KDL 返回码。
+            //    不可达时求解器不会说"无解"，而是返回最接近的位置——
+            //    只看返回码会把"够不着"当成"解出来了"。
+            const bool trustworthy = (error_norm <= kIkErrorToleranceM) && within_limits;
+
+            if (trustworthy) {
+                last_trusted_joints_[index] = joint_solution;
+                has_trusted_joints_[index] = true;
+                spider_targets.legs[index].joints = joint_solution;
+            } else {
+                // 拒绝不可信解、保留上一条：也就是"够不着就保持不动"。
+                // 把解不出来的角度照发出去，在真机上就是舵机顶死或者乱动。
+                ++rejected_count;
+                if (!has_trusted_joints_[index]) {
+                    // 自启动以来就没成功过：没有"上一条可信解"可用，
+                    // 只能输出零位。这一定意味着配置有问题，必须单独指出。
+                    ++never_solved_count;
+                }
+                spider_targets.legs[index].joints = last_trusted;
+            }
 
             RCLCPP_DEBUG(
                 this->get_logger(),
-                "[%s] leg=%s body_target=[%.4f, %.4f, %.4f] leg_target=[%.4f, %.4f, %.4f] ik=%d err=%.2fmm joints=[%.4f, %.4f, %.4f] fk_body=[%.4f, %.4f, %.4f]",
+                "[%s] leg=%s body_target=[%.4f, %.4f, %.4f] ik=%d err=%.2fmm limits=%d accepted=%d joints=[%.4f, %.4f, %.4f]",
                 tag.c_str(),
                 leg_name_cstr(leg_id),
                 body_target.x(),
                 body_target.y(),
                 body_target.z(),
-                leg_target.x(),
-                leg_target.y(),
-                leg_target.z(),
                 ik_result,
                 error_norm * 1000.0,
+                within_limits ? 1 : 0,
+                trustworthy ? 1 : 0,
                 joint_solution(0),
                 joint_solution(1),
-                joint_solution(2),
-                reconstructed_body_position.x(),
-                reconstructed_body_position.y(),
-                reconstructed_body_position.z());
+                joint_solution(2));
         }
 
-        // 只要有腿 IK 报错、或有腿回代误差超出容差，就汇总打一条 WARN。
-        // WARN_THROTTLE 保证 50Hz 控制循环下日志不会刷屏，但问题会持续可见。
-        if (ik_error_count > 0 || error_exceed_count > 0) {
+        // 汇总：只要有一条腿被拒绝，就说明"机器人不会按指令动"，必须报出来。
+        if (rejected_count > 0) {
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(),
                 *this->get_clock(),
                 1000,
-                "[%s] IK 回代诊断异常: ik_result<0 的有 %zu/%zu 腿, FK 回代误差超过 %.2fmm 的有 %zu/%zu 腿, 最大误差=%.2f mm",
+                "[%s] 有 %zu/%zu 条腿的解被拒绝（保留上一条可信解）：够不着 %zu、超关节限位 %zu、IK 报错 %zu；"
+                "其中 %zu 条自启动以来从未解出过可信解（正在输出零位角度，说明 leg_params.yaml 的站姿或关节限位配置有问题）；"
+                "本轮最大 FK 回代误差=%.2f mm",
                 tag.c_str(),
+                rejected_count,
+                leg_calc::kLegCount,
+                unreachable_count,
+                out_of_limit_count,
                 ik_error_count,
-                leg_calc::kLegCount,
-                kIkErrorToleranceM * 1000.0,
-                error_exceed_count,
-                leg_calc::kLegCount,
+                never_solved_count,
                 max_error_norm * 1000.0);
         } else {
             RCLCPP_DEBUG(
                 this->get_logger(),
-                "[%s] IK 回代诊断正常: 最大误差=%.4f mm",
+                "[%s] 全部六条腿的解均可信，最大 FK 回代误差=%.4f mm",
                 tag.c_str(),
                 max_error_norm * 1000.0);
         }
@@ -349,7 +560,10 @@ private:
         return spider_targets;
     }
 
-    void publish_servo_target(const std::string& tag, const leg_calc::BodyFootTargets& body_foot_targets) {
+    void publish_servo_target(
+        const std::string& tag,
+        const leg_calc::BodyFootTargets& body_foot_targets,
+        double motion_scale) {
         const auto spider_targets = solve_joint_targets(body_foot_targets, tag);
         // 映射层输出的是"真实舵机角"（0~1800），标定参数来自 servo_map.yaml。
         const auto mapping = leg_calc::Servo18Mapper::to_angle_ddeg(spider_targets, servo_map_);
@@ -377,16 +591,19 @@ private:
         msg.angle_ddeg = servo_angles;
         servo_target_publisher_->publish(msg);
 
+        // 命令快照走加锁读取，不要直接碰 latest_task_cmd_vel_（它受 task_cmd_mutex_ 保护）。
+        const auto cmd = snapshot_latest_task_cmd_vel();
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
             1000,
-            "[%s] body_frame=%s, task_cmd_vel=(%.3f, %.3f, %.3f), Servo18=%s",
+            "[%s] scale=%.3f, body_frame=%s, task_cmd_vel=(%.3f, %.3f, %.3f), Servo18=%s",
             tag.c_str(),
+            motion_scale,
             frame_bundle_.body_frame.frame_id.c_str(),
-            latest_task_cmd_vel_.linear.x,
-            latest_task_cmd_vel_.linear.y,
-            latest_task_cmd_vel_.angular.z,
+            cmd.linear.x,
+            cmd.linear.y,
+            cmd.angular.z,
             leg_calc::Servo18Mapper::to_debug_string(servo_angles).c_str());
     }
 
@@ -451,6 +668,13 @@ private:
     geometry_msgs::msg::Twist latest_task_cmd_vel_{};
     StaticLayoutConfig layout_config_{};
     leg_calc::SpiderFrameBundle frame_bundle_{};
+    leg_calc::JointLimits joint_limits_{};
+    // 每条腿最近一次"可信"的关节解。遇到够不着 / 超关节限位 / 收敛失败时保留它，
+    // 也就是"够不着就保持不动"，而不是把不可信的角度发出去。
+    std::array<leg_calc::JointVector, leg_calc::kLegCount> last_trusted_joints_{};
+    // 每条腿是否曾经解出过可信解。用来区分"暂时够不着（保留上一帧）"和
+    // "自启动就解不出来（配置有问题，只能输出零位）"。
+    std::array<bool, leg_calc::kLegCount> has_trusted_joints_{};
     KDL::Chain demo_chain_;
     std::shared_ptr<leg_calc::LegKinematics> kinematics_;
     std::vector<leg_calc::ServoMapEntry> servo_map_{};
@@ -462,7 +686,11 @@ private:
     mutable std::mutex task_cmd_mutex_;
     int control_period_ms_{20};
     double control_period_sec_{0.02};
-    bool motion_active_{false};
+    double motion_ramp_duration_sec_{1.0};
+    // 运动强度过渡的进度 [0, 1]。实际强度 = quintic_ease(ramp_progress_)。
+    double ramp_progress_{0.0};
+    // 最后一条非零速度命令，供停步减速阶段继续使用。
+    geometry_msgs::msg::Twist last_motion_cmd_{};
 };
 
 int main(int argc, char** argv) {

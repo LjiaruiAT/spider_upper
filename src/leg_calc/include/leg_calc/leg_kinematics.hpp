@@ -11,6 +11,8 @@
 #include <kdl/jacobian.hpp>
 #include <kdl/jntarray.hpp>
 
+#include <limits>
+
 namespace leg_calc {
 
 // 单腿运动学封装：把“足端位置/速度”和“关节角/角速度”互相转换。
@@ -41,6 +43,23 @@ public:
     void set_position_offset(const Eigen::Vector3d& offset) { position_offset_ = offset; }
     const Eigen::Vector3d& position_offset() const { return position_offset_; }
 
+    // ---- 径向可达区间 ----
+    //
+    // 目标点 |p| 落在 [min, max] 之外时 IK **一定**无解，所以在调用求解器之前
+    // 就能直接拒绝，省掉一次注定失败的数值迭代（LMA 默认最多迭代 150 次 × 6 条腿）。
+    //
+    // 注意这是**必要条件而不是充分条件**：落在区间内仍可能因为关节限位、
+    // 构型奇异等原因不可达，所以"解是否可信"的最终判据始终是 FK 回代误差。
+    //
+    // 之所以由调用方显式设置而不是自动推算：可达区间取决于链的几何**和拓扑**
+    // （例如"第一关节绕轴旋转"才会形成球壳），自动推算要对结构做假设；
+    // 显式传入更不容易出错，并且有单元测试保证它与链保持一致。
+    // 默认 (0, +inf) 表示不做径向预判。
+    void set_reach_limits(double min_reach_m, double max_reach_m);
+    double min_reach_m() const { return min_reach_m_; }
+    double max_reach_m() const { return max_reach_m_; }
+    bool is_within_reach(const Eigen::Vector3d& foot_pos) const;
+
 private:
     static KDL::JntArray to_kdl_joints(const JointVector& joints);
     static JointVector from_kdl_joints(const KDL::JntArray& joints);
@@ -57,6 +76,9 @@ private:
     KDL::JntArray last_joint_solution_;
 
     Eigen::Vector3d position_offset_{Eigen::Vector3d::Zero()};
+
+    double min_reach_m_{0.0};
+    double max_reach_m_{std::numeric_limits<double>::infinity()};
 };
 
 }  // namespace leg_calc

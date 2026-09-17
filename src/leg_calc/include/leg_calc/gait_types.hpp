@@ -17,14 +17,25 @@ enum class GaitPattern {
 // 注意：step_length_m / lateral_step_m / turn_step_rad 是**上限**，不是实际值。
 // 实际步长由"速度命令 × 支撑相时长"决定（见 FootTrajectory::compute_step_command），
 // 只有在命令速度超出机械能力时，才被这几个上限夹住。
+//
+// 这几个参数是**相互耦合**的：步长上限 + 步态频率 + 支撑相占比 三者一确定，
+// 能支持的最大速度也就确定了（见 max_forward_speed_mps）。改一个必须回头看另外两个，
+// 否则就会出现"命令 0.2 m/s、实际只走 0.08 m/s"这种命令与现实脱节的情况。
+//
+// 关于"身体站立高度"：它**不在**这里。站姿由 spider/config/leg_params.yaml 提供
+// （`body_height_mm`），因为那是机器人的几何属性，不是步态参数。
 struct GaitConfig {
     GaitPattern pattern{GaitPattern::Tripod};
-    double frequency_hz{1.0};         // 步态频率，单位 Hz（每秒多少个完整步态周期）
-    double step_length_m{0.04};       // 前进方向步长上限
-    double step_height_m{0.03};       // 抬腿最大高度
-    double lateral_step_m{0.02};      // 左右平移步长上限
-    double turn_step_rad{0.15};       // 转向角度上限
-    double body_height_m{0.12};       // 身体站立高度
+
+    // 步态频率。提高它能提高最大速度，但会压缩摆动相时间；
+    // 摆动相要在 (1 - stance_duty) / frequency 秒内完成"抬腿 + 前摆 + 落地"，
+    // 所以上限最终由舵机角速度决定。
+    double frequency_hz{2.5};
+
+    double step_length_m{0.04};   // 前进方向步长上限
+    double step_height_m{0.03};   // 抬腿最大高度
+    double lateral_step_m{0.02};  // 左右平移步长上限
+    double turn_step_rad{0.15};   // 转向角度上限
 };
 
 // 支撑相占整个步态周期的比例。
@@ -42,6 +53,49 @@ inline constexpr double stance_duty(GaitPattern pattern) {
         return 5.0 / 6.0;  // 每次只有一条腿摆动，摆动窗口占 1/6
     }
     return 0.5;
+}
+
+// 一个支撑相真实持续的时间（秒）= 支撑相占比 ÷ 步态频率。
+// 这是"速度 × 时间 = 位移"里那个"时间"，轨迹层和上面的能力上限共用它，
+// 避免两处各算一遍导致口径不一致。
+inline double stance_duration_s(const GaitConfig& config) {
+    constexpr double kMinFrequencyHz = 0.01;  // 防止除零
+    const double frequency_hz = config.frequency_hz > kMinFrequencyHz ? config.frequency_hz : kMinFrequencyHz;
+    return stance_duty(config.pattern) / frequency_hz;
+}
+
+// 当前参数能支持的最大前进速度（m/s），即"再快就会被步长上限夹住"的那个点：
+//   v_max = step_length_m ÷ 支撑相时长
+// 命令超过它时机器人**不会走得更快**，只是命令与现实脱节。
+// 节点启动时会打印它，命令超限时也会报警。
+inline double max_forward_speed_mps(const GaitConfig& config) {
+    return config.step_length_m / stance_duration_s(config);
+}
+
+inline double max_lateral_speed_mps(const GaitConfig& config) {
+    return config.lateral_step_m / stance_duration_s(config);
+}
+
+inline double max_turn_rate_rps(const GaitConfig& config) {
+    return config.turn_step_rad / stance_duration_s(config);
+}
+
+// 五次多项式缓动（quintic smoothstep）：把 [0, 1] 映射到 [0, 1]。
+//
+//   s(τ) = 10τ³ − 15τ⁴ + 6τ⁵
+//
+// 这个多项式的 6 个系数由 6 个边界条件唯一确定：
+//   s(0)=0, s(1)=1        （位置）
+//   s'(0)=0, s'(1)=0      （速度）
+//   s''(0)=0, s''(1)=0    （加速度）
+//
+// 用三次多项式只能满足前 4 个条件，加速度在两端不连续——那意味着冲击。
+// 五次把加速度也约束住，所以过渡过程中位置、速度、加速度都是连续的。
+//
+// 用途：起步/停步时的"运动强度"过渡（见 LegCalcNode 的 motion_scale）。
+inline constexpr double quintic_ease(double tau) {
+    const double t = tau < 0.0 ? 0.0 : (tau > 1.0 ? 1.0 : tau);
+    return t * t * t * (10.0 + t * (-15.0 + 6.0 * t));
 }
 
 // 单腿相位状态。Stance 时脚应近似留在地面，Swing 时脚离地移动到下一个落脚点。

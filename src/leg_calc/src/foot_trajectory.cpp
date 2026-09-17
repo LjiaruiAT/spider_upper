@@ -19,17 +19,22 @@ Eigen::Vector3d apply_planar_turn(const Eigen::Vector3d& nominal, double turn) {
     return rotated;
 }
 
+// 把运动强度夹到 [0, 1]。它是个"过渡系数"，不是需要精确表达的外部命令，
+// 所以越界只夹取、不报错。
+double clamp_motion_scale(double motion_scale) {
+    return std::clamp(motion_scale, 0.0, 1.0);
+}
+
 }  // namespace
 
 FootTrajectory::FootTrajectory(const GaitConfig& config)
     : config_(config) {}
 
 FootTrajectory::StepCommand FootTrajectory::compute_step_command(const BodyTwist& body_twist) const {
-    // 支撑相时长 = 支撑相占周期的比例 ÷ 步态频率。
-    // frequency_hz 表示"每秒走多少个完整周期"，而一个周期里只有一部分时间在支撑，
-    // 所以必须除以 duty，才是支撑相真正持续多久。
-    const double frequency_hz = std::max(config_.frequency_hz, 0.01);
-    const double stance_duration_s = stance_duty(config_.pattern) / frequency_hz;
+    // 支撑相时长直接复用 gait_types::stance_duration_s()，
+    // 这样"轨迹算出来的步长"和"能力上限 max_forward_speed_mps"永远同一个口径，
+    // 不会出现两处各算一遍、改了一处忘了另一处的情况。
+    const double stance_s = stance_duration_s(config_);
 
     // 速度 × 时间 = 位移：
     //   m/s   × s = m   （线速度 -> 步长，即这个支撑相内身体前进的距离）
@@ -37,13 +42,15 @@ FootTrajectory::StepCommand FootTrajectory::compute_step_command(const BodyTwist
     // 这是本层唯一一处把"速度命令"变成"位移"的地方，量纲必须自然成立。
     StepCommand command;
     command.translation = Eigen::Vector3d(
-        body_twist.linear.x() * stance_duration_s,
-        body_twist.linear.y() * stance_duration_s,
+        body_twist.linear.x() * stance_s,
+        body_twist.linear.y() * stance_s,
         0.0);
-    command.turn_rad = body_twist.angular.z() * stance_duration_s;
+    command.turn_rad = body_twist.angular.z() * stance_s;
 
     // 夹到配置上限。vx/vy/wz 来自外部输入，可能远超腿的机械能力；
     // 在轨迹层就拦住，比让 IK 解不出来更早、也更容易定位问题。
+    // 注意：被夹住意味着"机器人不会走得更快"，命令与现实脱节——
+    // 所以上层要能发现这一点（见 max_forward_speed_mps 与节点里的超限报警）。
     command.translation.x() =
         std::clamp(command.translation.x(), -config_.step_length_m, config_.step_length_m);
     command.translation.y() =
@@ -58,20 +65,26 @@ Eigen::Vector3d FootTrajectory::compute_foot_target(
     const Eigen::Vector3d& nominal_foot,
     LegPhase phase,
     double phase_fraction,
-    const BodyTwist& body_twist) {
+    const BodyTwist& body_twist,
+    double motion_scale) {
     // 相位只决定使用哪条轨迹；两条轨迹的返回值都是身体坐标系下的足端目标，
     // 还要经过 body_point_to_leg_point 才能作为 LegKinematics::inverse_position 的输入。
+    //
+    // motion_scale 在两条轨迹里统一生效，因此 scale = 0 时两者都退化成 nominal_foot，
+    // stand 与 gait 的输出在这个点上完全重合。
+    const double scale = clamp_motion_scale(motion_scale);
     if (phase == LegPhase::Stance) {
-        return stance_trajectory(leg_id, nominal_foot, phase_fraction, body_twist);
+        return stance_trajectory(leg_id, nominal_foot, phase_fraction, body_twist, scale);
     }
-    return swing_trajectory(leg_id, nominal_foot, phase_fraction, body_twist);
+    return swing_trajectory(leg_id, nominal_foot, phase_fraction, body_twist, scale);
 }
 
 Eigen::Vector3d FootTrajectory::stance_trajectory(
     LegId leg_id,
     const Eigen::Vector3d& nominal,
     double fraction,
-    const BodyTwist& body_twist) {
+    const BodyTwist& body_twist,
+    double motion_scale) {
     (void)leg_id;
 
     // 支撑相的物理前提：脚掌与地面接触，在世界坐标系里保持不动。
@@ -89,8 +102,8 @@ Eigen::Vector3d FootTrajectory::stance_trajectory(
     // 一个整步长的瞬跳（不只是起步时跳）。
     const double centered = 1.0 - (2.0 * fraction);
     const StepCommand step = compute_step_command(body_twist);
-    const Eigen::Vector3d planar_motion = 0.5 * step.translation * centered;
-    const double turn = 0.5 * step.turn_rad * centered;
+    const Eigen::Vector3d planar_motion = 0.5 * step.translation * centered * motion_scale;
+    const double turn = 0.5 * step.turn_rad * centered * motion_scale;
 
     // 线速度产生平移目标，角速度产生绕身体 z 轴的平面转动目标。
     Eigen::Vector3d target = nominal + planar_motion;
@@ -102,7 +115,8 @@ Eigen::Vector3d FootTrajectory::swing_trajectory(
     LegId leg_id,
     const Eigen::Vector3d& nominal,
     double fraction,
-    const BodyTwist& body_twist) {
+    const BodyTwist& body_twist,
+    double motion_scale) {
     (void)leg_id;
 
     // 摆动相分为：从 nominal 后方开始 -> 向前摆 -> 回到 nominal 前方。
@@ -113,12 +127,14 @@ Eigen::Vector3d FootTrajectory::swing_trajectory(
     const double lift = std::sin(kPi * std::clamp(fraction, 0.0, 1.0));
 
     const StepCommand step = compute_step_command(body_twist);
-    const Eigen::Vector3d planar_motion = 0.5 * step.translation * progress;
-    const double turn = 0.5 * step.turn_rad * progress;
+    const Eigen::Vector3d planar_motion = 0.5 * step.translation * progress * motion_scale;
+    const double turn = 0.5 * step.turn_rad * progress * motion_scale;
 
     Eigen::Vector3d target = nominal + planar_motion;
     target = apply_planar_turn(target, turn);
-    target.z() += config_.step_height_m * lift;
+    // 抬腿高度也随运动强度缩放：强度为 0 时六条腿全部贴地，
+    // 这样从步态切回站立姿态不会出现垂直跳变（否则摆动腿会在空中被"砸"下来）。
+    target.z() += config_.step_height_m * lift * motion_scale;
     return target;
 }
 

@@ -45,7 +45,8 @@ GaitConfig make_config() {
     config.step_height_m = kStepHeightM;
     config.lateral_step_m = kLateralLimitM;
     config.turn_step_rad = kTurnLimitRad;
-    config.body_height_m = kBodyHeightM;
+    // 站姿高度不在这里：它是机器人的几何属性，来自 spider/config/leg_params.yaml，
+    // 不是步态参数（这里以前有个重复的 body_height_m 死字段，已删除）。
     return config;
 }
 
@@ -69,8 +70,9 @@ Eigen::Vector3d foot_at(
     const Eigen::Vector3d& nominal,
     LegPhase phase,
     double fraction,
-    const BodyTwist& twist) {
-    return traj.compute_foot_target(LegId::LeftFront, nominal, phase, fraction, twist);
+    const BodyTwist& twist,
+    double motion_scale = 1.0) {
+    return traj.compute_foot_target(LegId::LeftFront, nominal, phase, fraction, twist, motion_scale);
 }
 
 // 一个支撑相内足端相对身体的移动量（正值 = 向后退了这么多，单位 m）
@@ -142,7 +144,9 @@ TEST(FootTrajectoryTest, SwingLiftReachesStepHeightAtMidPhase) {
     EXPECT_NEAR(foot_at(traj, nominal, LegPhase::Swing, 1.0, twist).z(), nominal.z(), 1e-12);
 }
 
-// 抬腿高度由相位决定，与速度命令无关（原地踏步也要抬脚）
+// 抬腿高度由相位决定，与速度命令无关（原地踏步也要抬脚）。
+// 但它**与运动强度成正比**——见后面的 MotionScale 系列测试：
+// 起步/停步过渡正是靠"强度 = 0 时腿贴地"来避免垂直跳变的。
 TEST(FootTrajectoryTest, SwingLiftDoesNotDependOnVelocity) {
     FootTrajectory traj(make_config());
     const auto nominal = nominal_foot();
@@ -309,4 +313,84 @@ TEST(FootTrajectoryTest, TurnRotatesFootAroundBodyZAxis) {
     const auto untouched = foot_at(traj, nominal, LegPhase::Stance, 0.0, forward_twist(0.0));
     EXPECT_NEAR(untouched.x(), nominal.x(), 1e-12);
     EXPECT_NEAR(untouched.y(), nominal.y(), 1e-12);
+}
+
+// ---------------------------------------------------------------------------
+// 运动强度（起步 / 停步过渡）
+//
+// motion_scale = 0 时足端必须在**所有相位、所有 fraction** 下都等于 nominal。
+// 这是"stand 与 gait 可以无缝切换"的全部依据：两者在 scale = 0 处输出重合，
+// 因此切换时不需要任何边界检测，也不会产生瞬跳。
+//
+// 这一条如果失败，说明有人只缩放了位移却忘了抬腿高度——
+// 那样停止时摆动腿会停在空中，切回站立的瞬间垂直跳一下（最多 30mm）。
+// ---------------------------------------------------------------------------
+TEST(FootTrajectoryTest, ZeroMotionScaleCollapsesToNominalPose) {
+    FootTrajectory traj(make_config());
+    const auto nominal = nominal_foot();
+    const auto twist = forward_twist(0.08);  // 速度命令不为零，但运动强度为 0
+
+    for (double fraction : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+        const auto stance = foot_at(traj, nominal, LegPhase::Stance, fraction, twist, 0.0);
+        EXPECT_TRUE(stance.isApprox(nominal, 1e-12))
+            << "强度=0 时支撑相必须等于站姿，fraction=" << fraction;
+
+        const auto swing = foot_at(traj, nominal, LegPhase::Swing, fraction, twist, 0.0);
+        EXPECT_TRUE(swing.isApprox(nominal, 1e-12))
+            << "强度=0 时摆动相也必须等于站姿（含抬腿高度），fraction=" << fraction;
+    }
+}
+
+// 运动强度对"水平位移"和"抬腿高度"要同比例缩放
+TEST(FootTrajectoryTest, MotionScaleScalesBothTravelAndLift) {
+    FootTrajectory traj(make_config());
+    const auto nominal = nominal_foot();
+    const auto twist = forward_twist(0.08);
+
+    const double full_travel =
+        foot_at(traj, nominal, LegPhase::Stance, 0.0, twist, 1.0).x()
+        - foot_at(traj, nominal, LegPhase::Stance, 1.0, twist, 1.0).x();
+    const double half_travel =
+        foot_at(traj, nominal, LegPhase::Stance, 0.0, twist, 0.5).x()
+        - foot_at(traj, nominal, LegPhase::Stance, 1.0, twist, 0.5).x();
+    EXPECT_NEAR(half_travel, 0.5 * full_travel, 1e-12);
+
+    const double full_lift =
+        foot_at(traj, nominal, LegPhase::Swing, 0.5, twist, 1.0).z() - nominal.z();
+    const double half_lift =
+        foot_at(traj, nominal, LegPhase::Swing, 0.5, twist, 0.5).z() - nominal.z();
+    EXPECT_NEAR(half_lift, 0.5 * full_lift, 1e-12);
+    EXPECT_NEAR(full_lift, kStepHeightM, 1e-12);
+}
+
+// 越界的强度只夹取，不报错，也不产生超范围的运动
+TEST(FootTrajectoryTest, MotionScaleIsClampedToUnitRange) {
+    FootTrajectory traj(make_config());
+    const auto nominal = nominal_foot();
+    const auto twist = forward_twist(0.08);
+
+    const auto below = foot_at(traj, nominal, LegPhase::Swing, 0.5, twist, -5.0);
+    const auto zero = foot_at(traj, nominal, LegPhase::Swing, 0.5, twist, 0.0);
+    EXPECT_TRUE(below.isApprox(zero, 1e-12));
+
+    const auto above = foot_at(traj, nominal, LegPhase::Swing, 0.5, twist, 9.0);
+    const auto one = foot_at(traj, nominal, LegPhase::Swing, 0.5, twist, 1.0);
+    EXPECT_TRUE(above.isApprox(one, 1e-12));
+}
+
+// 无论强度怎么变，两相衔接条件都必须成立（否则过渡过程中会出现瞬跳）
+TEST(FootTrajectoryTest, PhasesStayContinuousAtAnyMotionScale) {
+    FootTrajectory traj(make_config());
+    const auto nominal = nominal_foot();
+    const auto twist = forward_twist(0.08);
+
+    for (double scale : {0.0, 0.1, 0.37, 0.5, 0.9, 1.0}) {
+        const auto stance_end = foot_at(traj, nominal, LegPhase::Stance, 1.0, twist, scale);
+        const auto swing_start = foot_at(traj, nominal, LegPhase::Swing, 0.0, twist, scale);
+        const auto swing_end = foot_at(traj, nominal, LegPhase::Swing, 1.0, twist, scale);
+        const auto stance_start = foot_at(traj, nominal, LegPhase::Stance, 0.0, twist, scale);
+
+        EXPECT_TRUE(stance_end.isApprox(swing_start, 1e-12)) << "scale=" << scale;
+        EXPECT_TRUE(swing_end.isApprox(stance_start, 1e-12)) << "scale=" << scale;
+    }
 }

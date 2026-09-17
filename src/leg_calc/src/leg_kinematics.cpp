@@ -74,6 +74,18 @@ Eigen::Vector3d LegKinematics::forward_velocity(const JointVector& joint_pos, co
     return jacobian * joint_vel;
 }
 
+void LegKinematics::set_reach_limits(double min_reach_m, double max_reach_m) {
+    min_reach_m_ = min_reach_m;
+    max_reach_m_ = max_reach_m;
+}
+
+bool LegKinematics::is_within_reach(const Eigen::Vector3d& foot_pos) const {
+    // 必须和 inverse_position 用同一个坐标约定：可达性是针对**加上 offset 之后**
+    // 的 KDL 内部目标说的，否则设了非零 offset 之后边界会整体错位。
+    const double radius = (foot_pos + position_offset_).norm();
+    return radius >= min_reach_m_ && radius <= max_reach_m_;
+}
+
 KDL::JntArray LegKinematics::to_kdl_joints(const JointVector& joints) {
     // Eigen 和 KDL 使用不同的容器；这里只做 [coxa, femur, tibia] 的顺序保持转换。
     KDL::JntArray result(static_cast<unsigned int>(kLegJointDoF));

@@ -27,6 +27,25 @@ struct JointState {
     JointVector velocity{JointVector::Zero()};
 };
 
+// 关节角机械限位（弧度），顺序同样是 [coxa, femur, tibia]。
+//
+// 为什么需要它：IK 求出的解只要"数值上收敛"，求解器就认为成功，
+// 但那个角度机械上可能根本转不到（demo 链的 femur 就出现过 −24°）。
+// 超过限位的解不能直接下发，应该和"够不着"一样被拒绝。
+struct JointLimits {
+    JointVector min{JointVector::Zero()};
+    JointVector max{JointVector::Zero()};
+
+    bool contains(const JointVector& joints) const {
+        for (int i = 0; i < static_cast<int>(kLegJointDoF); ++i) {
+            if (joints(i) < min(i) || joints(i) > max(i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
 struct FootPose {
     // 足端位置的坐标系由调用上下文决定；leg_calc 的运动学接口使用腿局部坐标系，
     // FootTrajectory 生成的目标则使用身体坐标系。
