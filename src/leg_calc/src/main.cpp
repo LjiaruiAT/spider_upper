@@ -10,13 +10,11 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <kdl/chain.hpp>
-#include <kdl/frames.hpp>
-#include <kdl/joint.hpp>
-#include <kdl/segment.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <robot_interfaces/msg/servo18.hpp>
 
 #include "leg_calc/common_types.hpp"
+#include "leg_calc/demo_chain.hpp"
 #include "leg_calc/foot_trajectory.hpp"
 #include "leg_calc/gait_phase_manager.hpp"
 #include "leg_calc/leg_kinematics.hpp"
@@ -167,7 +165,7 @@ public:
 
         servo_target_publisher_ = this->create_publisher<robot_interfaces::msg::Servo18>("/spider/servo_target", 10);
 
-        demo_chain_ = build_demo_chain();
+        demo_chain_ = leg_calc::build_demo_chain();
         kinematics_ = std::make_shared<leg_calc::LegKinematics>(demo_chain_);
         kinematics_->set_position_offset(Eigen::Vector3d(0.0, 0.0, 0.0));
 
@@ -444,34 +442,6 @@ private:
         }
 
         return bundle;
-    }
-
-    static KDL::Chain build_demo_chain() {
-        // 这里只是为了让数学链路可以运行的演示模型，不是真实蜘蛛腿参数：
-        //   joint1: RotZ  -> coxa/yaw，改变腿在水平面的方向
-        //   joint2: RotY  -> femur/pitch
-        //   joint3: RotY  -> tibia/knee
-        // 后面的无关节 segment 只提供固定末端几何偏移。
-        // 当前 leg_params.yaml 中的腿长还没有用于替换这些常量；因此不要把这里的
-        // IK 输出直接当作真实舵机安装角。后续应让真实链结构与机械图纸一致。
-        KDL::Chain chain;
-        chain.addSegment(KDL::Segment(
-            "joint1",
-            KDL::Joint(KDL::Joint::RotZ),
-            KDL::Frame(KDL::Vector(0.0, 0.0, 0.0))));
-        chain.addSegment(KDL::Segment(
-            "joint2",
-            KDL::Joint(KDL::Joint::RotY),
-            KDL::Frame(KDL::Vector(0.06, 0.0, 0.0))));
-        chain.addSegment(KDL::Segment(
-            "joint3",
-            KDL::Joint(KDL::Joint::RotY),
-            KDL::Frame(KDL::Vector(0.12, 0.0, -0.02))));
-        chain.addSegment(KDL::Segment(
-            "foot",
-            KDL::Joint(KDL::Joint::None),
-            KDL::Frame(KDL::Vector(0.10, 0.0, -0.10))));
-        return chain;
     }
 
     uint8_t sequence_;
