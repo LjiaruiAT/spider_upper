@@ -12,16 +12,37 @@ enum class GaitPattern {
     Wave,    // 波动步态：每次移动 1 条腿（预留）
 };
 
-// 步态配置参数。速度命令不直接存放在这里；这些字段主要决定轨迹的尺度和周期。
+// 步态配置参数。速度命令不直接存放在这里；这些字段决定轨迹的尺度、周期和上限。
+//
+// 注意：step_length_m / lateral_step_m / turn_step_rad 是**上限**，不是实际值。
+// 实际步长由"速度命令 × 支撑相时长"决定（见 FootTrajectory::compute_step_command），
+// 只有在命令速度超出机械能力时，才被这几个上限夹住。
 struct GaitConfig {
     GaitPattern pattern{GaitPattern::Tripod};
-    double frequency_hz{1.0};         // 步态频率
-    double step_length_m{0.04};       // 前进方向的步长
+    double frequency_hz{1.0};         // 步态频率，单位 Hz（每秒多少个完整步态周期）
+    double step_length_m{0.04};       // 前进方向步长上限
     double step_height_m{0.03};       // 抬腿最大高度
-    double lateral_step_m{0.02};      // 左右平移步长
-    double turn_step_rad{0.15};       // 转向角度步长
+    double lateral_step_m{0.02};      // 左右平移步长上限
+    double turn_step_rad{0.15};       // 转向角度上限
     double body_height_m{0.12};       // 身体站立高度
 };
+
+// 支撑相占整个步态周期的比例。
+//
+// 为什么需要它：`速度 × 时间 = 位移`，而"时间"指的是支撑相真实持续了多久。
+// 不同步态的时间结构不同，所以这个比例不能统一写死 0.5，
+// 否则 Wave 步态下算出的步长会偏大 40% 以上。
+inline constexpr double stance_duty(GaitPattern pattern) {
+    switch (pattern) {
+    case GaitPattern::Tripod:
+        return 0.5;  // 两个三足组各占半个周期：一组支撑时另一组摆动
+    case GaitPattern::Ripple:
+        return 2.0 / 3.0;  // 三组轮流摆动，每组摆动窗口占 1/3
+    case GaitPattern::Wave:
+        return 5.0 / 6.0;  // 每次只有一条腿摆动，摆动窗口占 1/6
+    }
+    return 0.5;
+}
 
 // 单腿相位状态。Stance 时脚应近似留在地面，Swing 时脚离地移动到下一个落脚点。
 enum class LegPhase {

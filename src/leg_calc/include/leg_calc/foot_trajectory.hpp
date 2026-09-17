@@ -23,13 +23,23 @@ public:
         double phase_fraction,
         const BodyTwist& body_twist);
 
-    // 运行时更新步态配置（步长、高度等）
+    // 运行时更新步态配置（步长上限、高度等）
     void update_config(const GaitConfig& config) {
         config_ = config;
-        step_half_ = config_.step_length_m * 0.5;
     }
 
 private:
+    // 一个支撑相内，足端相对身体需要移动的"全步长"和"全转角"。
+    // translation：全步长，单位 m；turn_rad：全转角，单位 rad。
+    struct StepCommand {
+        Eigen::Vector3d translation{Eigen::Vector3d::Zero()};
+        double turn_rad{0.0};
+    };
+
+    // 把"速度 / 角速度命令"换算成"一个支撑相内的位移 / 转角"。
+    // 这是整个轨迹层唯一一处"速度 -> 位移"的换算，支撑相与摆动相共用。
+    StepCommand compute_step_command(const BodyTwist& body_twist) const;
+
     // 支撑相轨迹：足端向后滑动，推动身体前进
     Eigen::Vector3d stance_trajectory(
         LegId leg_id,
@@ -45,7 +55,6 @@ private:
         const BodyTwist& body_twist);
 
     GaitConfig config_;
-    double step_half_{0.02};  // step_length_m / 2，缓存用
 };
 
 }  // namespace leg_calc
