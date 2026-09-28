@@ -64,8 +64,12 @@
 
 | 文件 | 说明 | 状态 |
 |---|---|---|
-| **`mg996r.stl`** | **MG996R 完整装配体**（本体+安装耳+减振垫+线缆+输出轴，11 个零件合一） | ✅ 当前选型 |
-| **`mg996r.step`** | 同上，**STEP 格式**——要修改机械件、做装配干涉检查时用这个 | ✅ 当前选型 |
+| **`body.stl`** | **机身**（上下两层共 5 个结构件），已在 URDF 机身帧、单位米 | ✅ URDF 在用 |
+| **`coxa.stl`** | **髋连杆**，原点在髋关节、单位米 | ✅ URDF 在用 |
+| **`femur.stl`** | **股连杆**，原点在股关节、单位米 | ✅ URDF 在用 |
+| **`tibia.stl`** | **胫连杆**，原点在膝关节、单位米 | ✅ URDF 在用 |
+| `mg996r.stl` | MG996R 完整装配体（本体+安装耳+减振垫+线缆+输出轴，11 个零件合一） | 参考 |
+| `mg996r.step` | 同上，**STEP 格式**——要改机械件、做干涉检查时用这个 | 参考 |
 | `mg90s.stl` | MG90S 的 3D 模型 | ⚠ **已废弃** |
 | `sg90.stl` | SG90 的 3D 模型 | ⚠ **已废弃** |
 | `servo_lib/` | 开源 OpenSCAD 参数化模型库 | 参考用，**不含 MG996R** |
@@ -73,8 +77,66 @@
 
 > ⚠ `mg90s.stl` / `sg90.stl` 是**旧选型的模型**，和现在用的 MG996R 尺寸差一倍以上。
 > 留着只是为了追溯，**设计零件时不要用错**。
+>
+> ⚠ **`body/coxa/femur/tibia.stl` 和 `mg996r.stl` 的坐标系不一样**：前者是给 URDF 用的
+> （已在各自连杆帧、单位米），后者是零件本身（图纸坐标、单位毫米）。别混用。
 
-### `mg996r.stl` / `mg996r.step` 是怎么来的
+### 连杆 / 机身 mesh 是怎么来的（URDF 用）
+
+四个文件都由图纸导出，**原点在各自连杆的关节上、单位是米**，所以 URDF 里
+`<visual>` / `<collision>` **不写 `<origin>`、不写 `scale`** —— 多写任何一处，
+RViz 里就会表现为"mesh 飘在关节外面"，**且不报错**。
+
+```
+body.stl    机身 5 层：底板 Body + 支柱 Body002 + 电池架 Body001
+                      + PCB 托板 Body003 + 上盖 Body005
+coxa.stl    髋：Arm + HorizontalConnector + MotorConnector + ArmCap + BaseHolder
+femur.stl   股：MiddleArm
+tibia.stl   胫：ArmTip
+```
+
+> ⚠ **机身必须整体从同一份图纸导出**，不能挑几个 STL 拼：
+> `pcb_chasis_holder.stl` 与图纸里的 `Body003` 的 **z 中心差 15mm**，
+> 混用两边的坐标会让上层板和底板错位。
+>
+> 另外机身是**上下两层**的——只导底板（`chassis.stl`）会得到"上半部分是空的"，
+> 实物照片上看起来是单层，是因为电子件（PCB、电池）直接压在底板上，
+> 而 CAD 里它们是有独立托板和支柱的。
+
+**为什么需要 FreeCAD**：`.FCStd` 里的 `Placement` 是逐层累乘的（`App::Part` 容器自己也带旋转），
+手写 XML 解析极容易把旋转方向算反（本项目就踩过：y 的符号错了，导致零件"横"着，
+白绕了一大圈才发现）。用官方 API 的 `getGlobalPlacement()` 就没有这个风险。
+
+```bash
+conda create -y -n freecad -c conda-forge freecad   # apt 里是 0.19，打不开 1.x 格式
+```
+
+**关键事实（决定了脚本怎么写）**：
+
+| 事实 | 说明 |
+|---|---|
+| 图纸里**没有"装好的腿"** | `Arm` / `MiddleArm` / `ArmTip` 是三个各自独立建模、朝向互不相干的子装配 |
+| `ArmTip` 原点 = 膝关节 | 它的全局 x = **149.80 = 60.3 + 89.5**；抓住这个锚点就不用反推关节位置 |
+| 三个关节共线 | 图纸把腿伸直摆着 → 关节在 (0 / 60.3 / 149.80, **-14.77**, **12.15**) |
+| `HorizontalConnector` 与 `Arm` **平级** | 不是 `Arm` 的子对象，只导 `Arm` 会漏件 |
+| `App::Clone` / `Slice` 是**派生体** | `ArmHolderBase` 与 `Slice005` 与 `TopHolder+BottomHolder` 完全重合，必须按体积+包围盒去重 |
+| `App::Part` 带 `Extensions="True"` | 正则匹配 `<Object name="X">` 会漏掉它们——而装配容器恰好都带这个属性 |
+| 机身朝向要**量**出来 | 机壳沿 ±x 的极值点跨度只有 23.3mm（窄凸耳，朝中腿），沿 ±z 有 105.1mm（长边） |
+| 机壳高度 | 髋座（`coxa_mount`）底面在髋关节轴下方 **21.56mm**，机壳顶面贴在那里 |
+
+**重新生成**（改机械件后）：
+
+```bash
+cd src/spider
+~/miniconda3/envs/freecad/bin/freecadcmd \
+    -c "exec(open('scripts/export_cad_meshes.py').read())"
+```
+
+脚本是 `scripts/export_cad_meshes.py`，里面有全部坐标依据的注释。
+核心逻辑是：**对每个连杆取"相对所在容器原点"的 Placement，再整体减去该连杆的
+关节全局坐标，最后 ×0.001 换算成米**。背景见 `工程现状总结.md` 的 5.17 节。
+
+
 
 从图纸 `~/Desktop/exist_urdf/hardware/freecad/Hexapod-Leg.FCStd` 里导出的。
 那个文件里有一个名为 **`MG996R`** 的 `App::Part` 容器，装着 11 个零件：

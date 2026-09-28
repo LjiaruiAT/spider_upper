@@ -36,13 +36,15 @@
     —— 这一条如果错了，RViz 里的腿会朝反方向动，很难看出是符号问题。
 
 --------------------------------------------------------------------------
-当前是"最小可用"版本
+连杆的视觉 mesh
 --------------------------------------------------------------------------
-  · 连杆可视化用**长方体**，不是真实零件 mesh。
-    有 mesh 之后把 <geometry><box/></geometry> 换成 <mesh filename="..."/> 即可，
-    关节结构不用动。
-  · 机身是"腿座包络 + 边距"算出来的长方体，**不是真实机壳尺寸**。
-  · 没有 <inertial>：RViz 显示不需要，加 Gazebo 时才必须补。
+  · 三条连杆用模型文件 `model/{coxa,femur,tibia}.stl`，从机械图纸导出。
+  · mesh 的**坐标原点就是该连杆的关节**，单位已经是**米**——所以 URDF 里
+    <visual> 不需要 <origin>，也不需要 scale。这两个地方任何一处写错，
+    RViz 里都会表现成"mesh 飘在关节外面"，而且不会报错。
+  · 导出方法：`model/README.md` 的"连杆 / 机身 mesh 是怎么来的"一节（需要 FreeCAD）。
+  · 机身用 `model/body.stl`（图纸机身的 5 个结构件，上下两层），在同一机身帧里。
+  · 仍没有 <inertial>：RViz 显示不需要，接 Gazebo 时才必须补。
 """
 
 import argparse
@@ -50,14 +52,15 @@ import math
 import os
 import sys
 
-# 机身长方体相对腿座包络的边距（米）。仅为了让机身在视觉上把腿座包住，
-# 不是任何真实尺寸——真实机壳是 exist_urdf/hardware/stl/chassis.stl。
-BODY_MARGIN_M = 0.03
+# 机身 mesh：图纸机身的 5 个结构件（上下两层），已在机身帧里、单位米。
+BODY_MESH = "body.stl"
 
-# 连杆可视化的横截面（米）。粗细只影响观感，不影响关节位置。
-COXA_THICKNESS_M = 0.030
-FEMUR_THICKNESS_M = 0.025
-TIBIA_THICKNESS_M = 0.020
+# 三条连杆的 mesh 文件名。它们在 model/ 下，原点在各自关节、单位是米。
+LINK_MESHES = {
+    "coxa": "coxa.stl",
+    "femur": "femur.stl",
+    "tibia": "tibia.stl",
+}
 
 # 关节限位里的 effort / velocity。URDF 对 revolute 关节要求这两个字段。
 # 数值取自 MG996R 厂商标称（11 kg·cm ≈ 1.08 N·m；0.17 s/60° ≈ 6.2 rad/s），
@@ -213,47 +216,56 @@ def joint_xml(name, parent, child, xyz, rpy, axis, lower, upper):
     )
 
 
-def visual_link_xml(name, material_name, length, thickness):
-    """一根沿自身局部 x 轴伸出的连杆，可视化放在它的中点。"""
-    half = length * 0.5
+def link_xml(name, mesh_key, material_name):
+    """一条连杆：视觉与碰撞都用图纸导出的 mesh。
+
+    ⚠ **不写 `<origin>`，也不写 `scale`。**
+    mesh 的原点已经落在该连杆的关节上，单位已经换算成米。
+    在这里多写一个 origin（哪怕写 0 0 0 之外的值）或多写一个 scale，
+    RViz 里就会表现为"mesh 飘在关节外面"，而且**不报任何错**——只能靠肉眼发现。
+    """
+    geometry = (
+        f'      <geometry>\n'
+        f'        <mesh filename="package://spider/model/{LINK_MESHES[mesh_key]}"/>\n'
+        f'      </geometry>\n'
+    )
     return (
         f'  <link name="{name}">\n'
         f'    <visual>\n'
-        f'      <origin xyz="{fmt(half)} 0 0" rpy="0 0 0"/>\n'
-        f'      <geometry>\n'
-        f'        <box size="{fmt(length)} {fmt(thickness)} {fmt(thickness)}"/>\n'
-        f'      </geometry>\n'
+        f'{geometry}'
         f'{visual_material(material_name)}'
         f'    </visual>\n'
         f'    <collision>\n'
-        f'      <origin xyz="{fmt(half)} 0 0" rpy="0 0 0"/>\n'
-        f'      <geometry>\n'
-        f'        <box size="{fmt(length)} {fmt(thickness)} {fmt(thickness)}"/>\n'
-        f'      </geometry>\n'
+        f'{geometry}'
         f'    </collision>\n'
         f'  </link>\n'
     )
 
 
 def body_xml(params):
-    """机身：腿座包络 + 边距。只是个占位方块，不是真实机壳。"""
-    half_x = max(abs(m["x"]) for m in params["mounts"].values()) + BODY_MARGIN_M
-    half_y = max(m["y"] for m in params["mounts"].values()) + BODY_MARGIN_M
-    half_z = 0.02
+    """机身：图纸机身的 5 个结构件（底板 / 支柱 / 电池架 / PCB 托板 / 上盖）。
+
+    与连杆同理：mesh 已在机身帧里、单位是米，所以不写 origin / scale。
+    底板顶面落在 z = -21.56mm —— 实测髋座（coxa_mount）底面就在髋关节轴
+    下方这个高度，所以底板和六条腿的髋座是贴合的。
+
+    ⚠ 机身是**上下两层**的。只导底板会得到"上半部分是空的"
+    （整机照片上看不出第二层，但 CAD 里有托板和支柱）。
+    """
+    _ = params          # 机身几何不再由腿座位置推算
+    geometry = (
+        f'      <geometry>\n'
+        f'        <mesh filename="package://spider/model/{BODY_MESH}"/>\n'
+        f'      </geometry>\n'
+    )
     return (
         f'  <link name="spider_base">\n'
         f'    <visual>\n'
-        f'      <origin xyz="0 0 0" rpy="0 0 0"/>\n'
-        f'      <geometry>\n'
-        f'        <box size="{fmt(half_x * 2)} {fmt(half_y * 2)} {fmt(half_z * 2)}"/>\n'
-        f'      </geometry>\n'
+        f'{geometry}'
         f'{visual_material("body")}'
         f'    </visual>\n'
         f'    <collision>\n'
-        f'      <origin xyz="0 0 0" rpy="0 0 0"/>\n'
-        f'      <geometry>\n'
-        f'        <box size="{fmt(half_x * 2)} {fmt(half_y * 2)} {fmt(half_z * 2)}"/>\n'
-        f'      </geometry>\n'
+        f'{geometry}'
         f'    </collision>\n'
         f'  </link>\n'
     )
@@ -282,7 +294,7 @@ def leg_xml(params, leg_short, side, spec_key):
             *limits["coxa"],
         )
     )
-    out.append(visual_link_xml(f"{leg_short}_coxa_link", "coxa", coxa, COXA_THICKNESS_M))
+    out.append(link_xml(f"{leg_short}_coxa_link", "coxa", "coxa"))
 
     # 关节 2：femur 俯仰，位于 coxa 杆末端，绕局部 y。
     out.append(
@@ -296,7 +308,7 @@ def leg_xml(params, leg_short, side, spec_key):
             *limits["femur"],
         )
     )
-    out.append(visual_link_xml(f"{leg_short}_femur_link", "femur", femur, FEMUR_THICKNESS_M))
+    out.append(link_xml(f"{leg_short}_femur_link", "femur", "femur"))
 
     # 关节 3：tibia（膝盖），位于 femur 杆末端，同样绕局部 y。
     # 与 leg_chain.cpp 一致：q1 / q2 同号叠加。
@@ -311,7 +323,7 @@ def leg_xml(params, leg_short, side, spec_key):
             *limits["tibia"],
         )
     )
-    out.append(visual_link_xml(f"{leg_short}_tibia_link", "tibia", tibia, TIBIA_THICKNESS_M))
+    out.append(link_xml(f"{leg_short}_tibia_link", "tibia", "tibia"))
 
     return "".join(out)
 
