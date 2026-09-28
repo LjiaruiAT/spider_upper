@@ -177,20 +177,27 @@ def resolve_mount(params, leg_short, side, spec_key):
     return spec["x"], side * spec["y"], side * spec["yaw"]
 
 
-def material(name, rgba):
-    return f'    <material name="{name}">\n      <color rgba="{rgba}"/>\n    </material>\n'
-
-
-def link_xml(name, material_name):
-    return f'  <link name="{name}">\n{material(material_name, MATERIALS[material_name])}  </link>\n'
-
-
 MATERIALS = {
     "body": COLOR_BODY,
     "coxa": COLOR_COXA,
     "femur": COLOR_FEMUR,
     "tibia": COLOR_TIBIA,
 }
+
+
+def visual_material(name):
+    """渲染在 <visual> 内部的 <material>。
+
+    ⚠ 位置必须是 <visual> 的**子元素**，不能直接挂在 <link> 下。
+    挂错了**不会报错**——urdf 解析器会直接忽略它，然后 RViz 用默认的红色画
+    所有 link。表现为"机器人画出来了，但全是红的"，看不出是材质问题。
+    （第一次就是这么写错的，靠截图才发现。）
+    """
+    return (
+        f'      <material name="{name}">\n'
+        f'        <color rgba="{MATERIALS[name]}"/>\n'
+        f'      </material>\n'
+    )
 
 
 def joint_xml(name, parent, child, xyz, rpy, axis, lower, upper):
@@ -211,12 +218,12 @@ def visual_link_xml(name, material_name, length, thickness):
     half = length * 0.5
     return (
         f'  <link name="{name}">\n'
-        f'{material(material_name, MATERIALS[material_name])}'
         f'    <visual>\n'
         f'      <origin xyz="{fmt(half)} 0 0" rpy="0 0 0"/>\n'
         f'      <geometry>\n'
         f'        <box size="{fmt(length)} {fmt(thickness)} {fmt(thickness)}"/>\n'
         f'      </geometry>\n'
+        f'{visual_material(material_name)}'
         f'    </visual>\n'
         f'    <collision>\n'
         f'      <origin xyz="{fmt(half)} 0 0" rpy="0 0 0"/>\n'
@@ -235,12 +242,12 @@ def body_xml(params):
     half_z = 0.02
     return (
         f'  <link name="spider_base">\n'
-        f'{material("body", COLOR_BODY)}'
         f'    <visual>\n'
         f'      <origin xyz="0 0 0" rpy="0 0 0"/>\n'
         f'      <geometry>\n'
         f'        <box size="{fmt(half_x * 2)} {fmt(half_y * 2)} {fmt(half_z * 2)}"/>\n'
         f'      </geometry>\n'
+        f'{visual_material("body")}'
         f'    </visual>\n'
         f'    <collision>\n'
         f'      <origin xyz="0 0 0" rpy="0 0 0"/>\n'
