@@ -13,6 +13,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <fstream>
 #include <sstream>
@@ -24,8 +25,10 @@
 
 namespace {
 
+using leg_calc::joint_state_name;
 using leg_calc::JointId;
 using leg_calc::JointVector;
+using leg_calc::kAllLegIds;
 using leg_calc::LegId;
 using leg_calc::Servo18Mapper;
 using leg_calc::ServoMapEntry;
@@ -257,4 +260,49 @@ TEST(Servo18MapperTest, YamlRejectsUnknownLegOrJoint) {
     const auto path = write_temp_yaml(yaml, "servo_map_bad_leg.yaml");
 
     EXPECT_THROW(Servo18Mapper::load_map_from_yaml(path), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// 关节命名规则：与 spider/scripts/generate_urdf.py 的跨语言契约
+// ---------------------------------------------------------------------------
+//
+// 这条规则错了**不会报错**，只会让 RViz 里的腿一动不动——/joint_states 里
+// 名字对不上的条目会被 robot_state_publisher 静默忽略，日志上看不出任何异常。
+// 所以下面把格式和完整列表都钉死，而不是只测一两个样本。
+
+TEST(Servo18MapperTest, JointStateNameFollowsPattern) {
+    EXPECT_EQ(joint_state_name(LegId::LeftFront, JointId::Coxa), "lf_coxa_joint");
+    EXPECT_EQ(joint_state_name(LegId::LeftFront, JointId::Femur), "lf_femur_joint");
+    EXPECT_EQ(joint_state_name(LegId::LeftFront, JointId::Tibia), "lf_tibia_joint");
+    EXPECT_EQ(joint_state_name(LegId::RightMiddle, JointId::Femur), "rm_femur_joint");
+    EXPECT_EQ(joint_state_name(LegId::RightRear, JointId::Tibia), "rr_tibia_joint");
+}
+
+// 18 个名字必须两两不同：若有重名，后一个会静默覆盖前一个，
+// 表现为"某两条腿永远同步动作"，非常难查。
+TEST(Servo18MapperTest, JointStateNamesAreAllDistinct) {
+    std::vector<std::string> names;
+    for (const auto leg_id : kAllLegIds) {
+        for (const auto joint_id : {JointId::Coxa, JointId::Femur, JointId::Tibia}) {
+            names.push_back(joint_state_name(leg_id, joint_id));
+        }
+    }
+    ASSERT_EQ(names.size(), 18u);
+
+    auto sorted = names;
+    std::sort(sorted.begin(), sorted.end());
+    EXPECT_EQ(std::unique(sorted.begin(), sorted.end()), sorted.end());
+}
+
+// 腿名部分必须复用 leg_name()：腿名已经在日志和 servo_map.yaml 里作为键使用，
+// 这里不能另起一套写法。
+TEST(Servo18MapperTest, JointStateNameLegPartMatchesLegName) {
+    for (const auto leg_id : kAllLegIds) {
+        const auto prefix = leg_calc::leg_name(leg_id) + "_";
+        for (const auto joint_id : {JointId::Coxa, JointId::Femur, JointId::Tibia}) {
+            const auto name = joint_state_name(leg_id, joint_id);
+            EXPECT_EQ(name.rfind(prefix, 0), 0u) << name;
+            EXPECT_EQ(name.size() >= 6 ? name.substr(name.size() - 6) : name, "_joint") << name;
+        }
+    }
 }

@@ -13,6 +13,7 @@
 #include <kdl/chain.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <robot_interfaces/msg/servo18.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 
 #include "leg_calc/command_watchdog.hpp"
 #include "leg_calc/common_types.hpp"
@@ -207,6 +208,11 @@ public:
             std::bind(&LegCalcNode::task_cmd_vel_callback, this, std::placeholders::_1));
 
         servo_target_publisher_ = this->create_publisher<robot_interfaces::msg::Servo18>("/spider/servo_target", 10);
+
+        // /joint_states：给 robot_state_publisher -> RViz 用。
+        // 数据源就是 IK 解出的关节角，不需要任何额外计算——这个发布点是"免费"的，
+        // 只是把已经算出来的东西说出来而已。
+        joint_state_publisher_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
 
         const auto spider_share = ament_index_cpp::get_package_share_directory("spider");
         servo_map_path_ = spider_share + "/config/servo_map.yaml";
@@ -571,11 +577,41 @@ private:
         return spider_targets;
     }
 
+    // 把六条腿的关节角发成 /joint_states，供 robot_state_publisher 算 TF、
+    // RViz 画机器人。
+    //
+    // 关节角**直接就是 IK 的解，不需要任何换算**：URDF 里 coxa 绕 z、
+    // femur/tibia 绕 y，与 leg_chain.cpp 的 RotZ / RotY 是同一套右手系约定。
+    // 这一条如果错了，RViz 里的腿会朝反方向动——很难看出是符号问题，
+    // 所以特意在这里写明白。
+    //
+    // 关节名走 leg_calc::joint_state_name()，它和 generate_urdf.py 是跨语言契约，
+    // 名字对不上时腿不会动而且不报错（见 servo18_mapper.hpp 的说明）。
+    void publish_joint_states(const leg_calc::SpiderJointTargets& targets) {
+        sensor_msgs::msg::JointState msg;
+        msg.header.stamp = this->now();
+        msg.name.reserve(leg_calc::kLegCount * 3);
+        msg.position.reserve(leg_calc::kLegCount * 3);
+
+        for (const auto leg_id : leg_calc::kAllLegIds) {
+            const auto index = leg_calc::leg_index(leg_id);
+            for (const auto joint_id : {leg_calc::JointId::Coxa, leg_calc::JointId::Femur, leg_calc::JointId::Tibia}) {
+                msg.name.push_back(leg_calc::joint_state_name(leg_id, joint_id));
+                msg.position.push_back(targets.legs[index].joints(static_cast<int>(joint_id)));
+            }
+        }
+
+        joint_state_publisher_->publish(msg);
+    }
+
     void publish_servo_target(
         const std::string& tag,
         const leg_calc::BodyFootTargets& body_foot_targets,
         double motion_scale) {
         const auto spider_targets = solve_joint_targets(body_foot_targets, tag);
+        // 关节角与舵机帧发的是同一批解：RViz 里看到的姿态就是真正发下去的姿态，
+        // 不是另算的一套"显示用"数据。这样 RViz 才能当调试工具用。
+        publish_joint_states(spider_targets);
         // 映射层输出的是"真实舵机角"（0~1800），标定参数来自 servo_map.yaml。
         const auto mapping = leg_calc::Servo18Mapper::to_angle_ddeg(spider_targets, servo_map_);
         const auto& servo_angles = mapping.angle_ddeg;
@@ -674,6 +710,7 @@ private:
     std::string servo_map_path_;
     std::string leg_params_path_;
     rclcpp::Publisher<robot_interfaces::msg::Servo18>::SharedPtr servo_target_publisher_;
+    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_publisher_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr task_cmd_vel_subscription_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     mutable std::mutex task_cmd_mutex_;

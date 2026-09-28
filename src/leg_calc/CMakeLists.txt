@@ -12,6 +12,7 @@ find_package(Eigen3 REQUIRED)
 find_package(orocos_kdl REQUIRED)
 find_package(kdl_parser REQUIRED)
 find_package(robot_interfaces REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
 # ---------------------------------------------------------------------------
 # leg_calc_core：与 ROS 无关的纯数学 / 映射库
@@ -56,6 +57,7 @@ ament_target_dependencies(leg_calc_node
   rclcpp
   kdl_parser
   robot_interfaces
+  sensor_msgs
 )
 
 install(TARGETS

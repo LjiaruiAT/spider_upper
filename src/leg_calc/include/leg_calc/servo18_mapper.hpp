@@ -17,6 +17,22 @@ enum class JointId {
     Tibia = 2,
 };
 
+// /joint_states 与 URDF 之间的关节命名规则：
+//     {leg}_{joint}_joint        例如 lf_coxa_joint
+//
+// ⚠ 这条规则同时被两处使用，必须严格一致：
+//    · leg_calc 发布的 /joint_states（本函数）
+//    · spider/scripts/generate_urdf.py 生成的 URDF（那边是 Python 拼字符串）
+//
+// 对不上时 RViz 里**腿不会动，而且不会报错**——joint_states 里名字对不上的
+// 条目会被 robot_state_publisher 静默忽略。这种故障没有任何日志能提示你，
+// 所以这里用测试把格式钉死：任何一方改了命名，测试会立刻失败。
+inline std::string joint_state_name(LegId leg_id, JointId joint_id) {
+    static constexpr const char* kJointNames[] = {"coxa", "femur", "tibia"};
+    const auto index = static_cast<std::size_t>(joint_id);
+    return leg_name(leg_id) + "_" + kJointNames[index] + "_joint";
+}
+
 struct LegJointSet {
     JointVector joints{JointVector::Zero()};
 };
