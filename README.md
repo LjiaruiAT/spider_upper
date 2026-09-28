@@ -41,6 +41,10 @@ source install/setup.bash
 **终端 A：**
 
 ```bash
+# 行走视角：机器人在地面上真的走
+ros2 launch launch_pack spider_walk.launch.py
+
+# 姿态视角：机身钉在原点，只看六条腿怎么动
 ros2 launch launch_pack spider_display.launch.py
 ```
 
@@ -90,7 +94,7 @@ ros2 launch launch_pack spider_minimal.launch.py
 ./build/leg_calc/test_leg_chain
 ./build/leg_calc/test_leg_layout
 ./build/leg_calc/test_servo18_mapper
-# ... 共 10 个文件，全部列在 工程现状总结.md 第 8 节
+# ... 共 11 个文件，全部列在 工程现状总结.md 第 8 节
 
 # 官方口径
 colcon test --packages-select leg_calc

@@ -14,6 +14,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <robot_interfaces/msg/servo18.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <tf2_ros/transform_broadcaster.h>
 
 #include "leg_calc/command_watchdog.hpp"
 #include "leg_calc/common_types.hpp"
@@ -22,6 +23,7 @@
 #include "leg_calc/leg_chain.hpp"
 #include "leg_calc/leg_kinematics.hpp"
 #include "leg_calc/leg_layout.hpp"
+#include "leg_calc/odometry_integrator.hpp"
 #include "leg_calc/servo18_mapper.hpp"
 #include "leg_calc/velocity_smoother.hpp"
 
@@ -214,6 +216,11 @@ public:
         // 只是把已经算出来的东西说出来而已。
         joint_state_publisher_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
 
+        // TF：发布 odom -> spider_base 这条边。
+        // robot_state_publisher 发的是 spider_base -> 各连杆（来自 URDF），
+        // 加上这条边，RViz 才能把机器人画在"地面"上而不是钉在原点。
+        tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
+
         const auto spider_share = ament_index_cpp::get_package_share_directory("spider");
         servo_map_path_ = spider_share + "/config/servo_map.yaml";
         leg_params_path_ = spider_share + "/config/leg_params.yaml";
@@ -374,6 +381,20 @@ private:
             0.0,
             1.0);
         const double motion_scale = leg_calc::quintic_ease(ramp_progress_);
+
+        // 里程计：用**乘过 motion_scale** 的速度积分。为什么必须乘 motion_scale，
+        // 见 odometry_integrator.hpp——起步/停步过渡期间脚并没有真把机身推动那么多，
+        // 直接用命令速度积分会让机身在该停的时候还在幽灵般地移动。
+        //
+        // 放在下面那条"彻底停下"的早退**之前**，是为了让它也照常广播 TF：
+        // TF 一旦断掉，RViz 里 robot_state_publisher 发的整棵子树会一起消失。
+        {
+            leg_calc::BodyTwist scaled_twist = velocity_smoother_.current();
+            scaled_twist.linear *= motion_scale;
+            scaled_twist.angular *= motion_scale;
+            odometry_.update(scaled_twist, control_period_sec_);
+        }
+        publish_odometry();
 
         // 已经彻底停下：回到标称站姿，并复位相位与速度平滑器，
         // 让下次起步总从"相位 0 + 零速度"开始。
@@ -587,6 +608,40 @@ private:
     //
     // 关节名走 leg_calc::joint_state_name()，它和 generate_urdf.py 是跨语言契约，
     // 名字对不上时腿不会动而且不报错（见 servo18_mapper.hpp 的说明）。
+    // 发布 odom -> spider_base。
+    //
+    // 为什么必须有这条边：URDF 的根 link 是 spider_base，**按定义它永远在世界
+    // 原点**。RViz 的 Fixed Frame 只能设成它，于是机身被钉死，你只能看到六条腿
+    // 在原地划水——机器人其实在往前走，但这件事没有任何地方表达出来。
+    //
+    // 加上 odom 之后，把 Fixed Frame 改成 odom 就能看到机器人横穿地面，
+    // 而**支撑足在世界系里站住不动**——那才是"走路"看起来应该有的样子。
+    //
+    // ⚠ 积分用的是命令速度，不是传感器数据。打滑或舵机跟不上时它就不准了，
+    //    所以它只是**可视化辅助**，不能当真实里程计用（详见 odometry_integrator.hpp）。
+    void publish_odometry() {
+        const auto& odom_T_base = odometry_.odom_T_base();
+
+        geometry_msgs::msg::TransformStamped msg;
+        msg.header.stamp = this->now();
+        // 约定的方向：父 = odom（地面），子 = 机身。与 TF 一致。
+        msg.header.frame_id = "odom";
+        msg.child_frame_id = frame_bundle_.body_frame.frame_id;
+
+        const Eigen::Vector3d translation = odom_T_base.translation();
+        msg.transform.translation.x = translation.x();
+        msg.transform.translation.y = translation.y();
+        msg.transform.translation.z = translation.z();
+
+        const Eigen::Quaterniond rotation(odom_T_base.linear());
+        msg.transform.rotation.w = rotation.w();
+        msg.transform.rotation.x = rotation.x();
+        msg.transform.rotation.y = rotation.y();
+        msg.transform.rotation.z = rotation.z();
+
+        tf_broadcaster_->sendTransform(msg);
+    }
+
     void publish_joint_states(const leg_calc::SpiderJointTargets& targets) {
         sensor_msgs::msg::JointState msg;
         msg.header.stamp = this->now();
@@ -694,6 +749,9 @@ private:
     leg_calc::CommandWatchdog command_watchdog_;
     // 超时告警只在状态翻转的那一拍报一次，避免每 20ms 刷一条。
     bool stale_warned_{false};
+    // 按命令速度积分出的机身位姿，用来发 odom -> spider_base（见 odometry_integrator.hpp）。
+    leg_calc::OdometryIntegrator odometry_;
+    std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     geometry_msgs::msg::Twist latest_task_cmd_vel_{};
     leg_calc::LegLayoutConfig layout_config_{};
     leg_calc::SpiderFrameBundle frame_bundle_{};

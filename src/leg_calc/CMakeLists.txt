@@ -13,6 +13,7 @@ find_package(orocos_kdl REQUIRED)
 find_package(kdl_parser REQUIRED)
 find_package(robot_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 # ---------------------------------------------------------------------------
 # leg_calc_core：与 ROS 无关的纯数学 / 映射库
@@ -27,6 +28,7 @@ add_library(leg_calc_core STATIC
   src/leg_chain.cpp
   src/leg_kinematics.cpp
   src/leg_layout.cpp
+  src/odometry_integrator.cpp
   src/servo18_mapper.cpp
   src/velocity_smoother.cpp
 )
@@ -58,6 +60,7 @@ ament_target_dependencies(leg_calc_node
   kdl_parser
   robot_interfaces
   sensor_msgs
+  tf2_ros
 )
 
 install(TARGETS
@@ -98,6 +101,7 @@ if(BUILD_TESTING)
     test_leg_chain
     test_leg_kinematics
     test_leg_layout
+    test_odometry_integrator
     test_servo18_mapper
     test_velocity_smoother
   )
