@@ -7,6 +7,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/twist.hpp>
@@ -639,7 +640,38 @@ private:
         msg.transform.rotation.y = rotation.y();
         msg.transform.rotation.z = rotation.z();
 
-        tf_broadcaster_->sendTransform(msg);
+        // ------------------------------------------------------------------
+        // body_anchor：位置跟随机身，但**姿态固定为世界朝向**。
+        //
+        // 这个是专门给 RViz 当 Target Frame 用的，因为 RViz 的 Target Frame
+        // 同时决定了**相机看哪**和**相机的朝向基准**：
+        //
+        //   Target Frame = spider_base  ->  相机跟着机身一起转。
+        //       自旋时机器人看起来是**静止的**，反倒是整个世界在转——
+        //       明明在转却看不出来，非常误导。
+        //   Target Frame = odom         ->  相机完全不动。
+        //       平移时会直接走出画面（而且相机不会跟）。
+        //
+        // 用这个锚点：位置跟随（平移看得见）+ 姿态固定（旋转也看得见），
+        // 两个都解决。
+        //
+        // 它不参与运动学，只给可视化用；发失败了也不影响控制。
+        // ------------------------------------------------------------------
+        geometry_msgs::msg::TransformStamped anchor;
+        anchor.header.stamp = msg.header.stamp;
+        anchor.header.frame_id = "odom";
+        anchor.child_frame_id = "body_anchor";
+        // 位置照抄机身，姿态留单位四元数（= 与世界对齐）
+        anchor.transform.translation = msg.transform.translation;
+        anchor.transform.rotation.w = 1.0;
+
+        // 两条边放在**同一条消息**里发。分两次 sendTransform 会变成两条消息，
+        // 消息数和订阅端的反序列化次数都翻倍，没有任何好处。
+        std::vector<geometry_msgs::msg::TransformStamped> transforms;
+        transforms.reserve(2);
+        transforms.push_back(msg);
+        transforms.push_back(anchor);
+        tf_broadcaster_->sendTransform(transforms);
     }
 
     void publish_joint_states(const leg_calc::SpiderJointTargets& targets) {

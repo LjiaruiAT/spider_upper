@@ -58,7 +58,7 @@ Visualization Manager:
     Background Color: 45; 45; 48
     Fixed Frame: odom
     Frame Rate: 30
-    Target Frame: spider_base
+    Target Frame: body_anchor
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
@@ -73,7 +73,7 @@ Visualization Manager:
       Name: Current View
       Near Clip Distance: 0.01
       Pitch: 0.45
-      Target Frame: spider_base
+      Target Frame: body_anchor
       Value: Orbit (rviz)
       Yaw: 2.36
     Saved: ~
