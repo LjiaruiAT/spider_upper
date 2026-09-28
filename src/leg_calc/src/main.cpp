@@ -14,6 +14,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <robot_interfaces/msg/servo18.hpp>
 
+#include "leg_calc/command_watchdog.hpp"
 #include "leg_calc/common_types.hpp"
 #include "leg_calc/foot_trajectory.hpp"
 #include "leg_calc/gait_phase_manager.hpp"
@@ -190,6 +191,16 @@ public:
             motion_ramp_duration_sec_ = 1.0;
         }
 
+        // 命令看门狗的超时。默认 0.25s 与 spider_task 的 cmd_vel_timeout_sec 一致，
+        // 而 spider_task 的发布周期是 20ms——0.25s 相当于容忍连丢 12 拍，
+        // 正常抖动绝不会触发。<= 0 表示关闭看门狗。
+        //
+        // 为什么阈值要和上游一致：两边管的是同一件事（"命令还新不新"），只是层级不同。
+        // 如果 leg_calc 更宽松，上游超时发零之后本地还要再等一截才生效，
+        // 那段时间里"两个保护都不生效"。
+        declare_parameter<double>("task_cmd_timeout_sec", 0.25);
+        command_watchdog_.set_timeout_sec(this->get_parameter("task_cmd_timeout_sec").as_double());
+
         task_cmd_vel_subscription_ = this->create_subscription<geometry_msgs::msg::Twist>(
             "/spider/task_cmd_vel",
             10,
@@ -322,7 +333,29 @@ private:
 
     void control_loop() {
         const auto latest_cmd = snapshot_latest_task_cmd_vel();
-        const bool wants_motion = !is_zero_command(latest_cmd);
+
+        // 命令新鲜度检查：命令来源（spider_task）可能崩溃 / 卡死 / 被 OOM 杀掉。
+        // 那些情况下它内部的超时保护根本不会被执行，leg_calc 就会拿着最后一条
+        // 非零命令一直走下去。所以执行端必须自己再判断一次（见 command_watchdog.hpp）。
+        //
+        // 关键：这里**只把命令当作零**，不去动 motion_scale / velocity_smoother_。
+        // 命令变零之后就走进"正常停步路径"——motion_scale 用五次曲线把强度降下来。
+        // 刻意不为紧急情况另写一条停步路径：那种路径平时不被走到，真出事时才发现
+        // 它有问题就晚了，而且它永远得不到端到端验证。
+        const bool cmd_expired = command_watchdog_.stale_motion(this->now().seconds());
+        if (cmd_expired && !stale_warned_) {
+            stale_warned_ = true;
+            RCLCPP_WARN(
+                this->get_logger(),
+                "%.3f s 未收到 /spider/task_cmd_vel（超时阈值 %.3f s），按停步处理；"
+                "通常是 spider_task 已退出或卡死",
+                command_watchdog_.age_sec(this->now().seconds()),
+                command_watchdog_.timeout_sec());
+        } else if (!cmd_expired) {
+            stale_warned_ = false;
+        }
+
+        const bool wants_motion = !cmd_expired && !is_zero_command(latest_cmd);
 
         // 运动强度过渡：起步时 0 -> 1，停步时 1 -> 0，曲线用五次多项式。
         //
@@ -339,6 +372,10 @@ private:
         // 已经彻底停下：回到标称站姿，并复位相位与速度平滑器，
         // 让下次起步总从"相位 0 + 零速度"开始。
         // 此时 motion_scale 已经是 0，步态输出本来就等于站姿，这个切换是无缝的。
+        // ⚠ 这里**不要**再调 command_watchdog_.reset()。
+        // 看门狗记录的是"上游最后一次说话是什么时候"。一旦把它清成"从未收到过命令"，
+        // stale_motion() 会立刻变回 false，于是上面那条过期的非零命令又被当成有效，
+        // 机器人会重新开始走——正好是这次改动要消灭的那个故障。
         if (!wants_motion && ramp_progress_ <= 0.0) {
             gait_phase_manager_.reset();
             velocity_smoother_.reset();
@@ -574,7 +611,7 @@ private:
             this->get_logger(),
             *this->get_clock(),
             1000,
-            "[%s] scale=%.3f, body_frame=%s, cmd=(%.3f, %.3f, %.3f), applied=(%.3f, %.3f, %.3f), Servo18=%s",
+            "[%s] scale=%.3f, body_frame=%s, cmd=(%.3f, %.3f, %.3f), applied=(%.3f, %.3f, %.3f), cmd_age=%.3f s, Servo18=%s",
             tag.c_str(),
             motion_scale,
             frame_bundle_.body_frame.frame_id.c_str(),
@@ -584,6 +621,9 @@ private:
             applied.linear.x(),
             applied.linear.y(),
             applied.angular.z(),
+            // 命令年龄：看门狗起作用时，这个数会一直涨到超过 task_cmd_timeout_sec。
+            // 排查"为什么停了"时，这是最直接的一个数。
+            command_watchdog_.age_sec(this->now().seconds()),
             leg_calc::Servo18Mapper::to_debug_string(servo_angles).c_str());
     }
 
@@ -592,6 +632,10 @@ private:
             std::lock_guard<std::mutex> lock(task_cmd_mutex_);
             latest_task_cmd_vel_ = *msg;
         }
+        // 告诉看门狗"命令来了"，同时说明这条是不是运动命令。
+        // spider_task 站立时只在进入 stand 的那一刻发一次零，之后长时间不发；
+        // 若对零命令也判过期，正常站立会一直刷假警报。
+        command_watchdog_.on_command(this->now().seconds(), !is_zero_command(*msg));
 
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
@@ -610,6 +654,10 @@ private:
     // 速度命令平滑器。它持有"当前速度"，必须是长期成员而不是每周期重建；
     // 同时它也是停步减速阶段"最后一条有效速度"的来源（停步时被冻结）。
     leg_calc::VelocitySmoother velocity_smoother_;
+    // 命令看门狗：命令来源断掉时把命令当作零，从而走正常停步路径。
+    leg_calc::CommandWatchdog command_watchdog_;
+    // 超时告警只在状态翻转的那一拍报一次，避免每 20ms 刷一条。
+    bool stale_warned_{false};
     geometry_msgs::msg::Twist latest_task_cmd_vel_{};
     leg_calc::LegLayoutConfig layout_config_{};
     leg_calc::SpiderFrameBundle frame_bundle_{};

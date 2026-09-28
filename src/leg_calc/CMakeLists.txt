@@ -20,6 +20,7 @@ find_package(robot_interfaces REQUIRED)
 #     也保证测试验证的就是实际运行的那份代码
 # ---------------------------------------------------------------------------
 add_library(leg_calc_core STATIC
+  src/command_watchdog.cpp
   src/foot_trajectory.cpp
   src/gait_phase_manager.cpp
   src/leg_chain.cpp
@@ -87,6 +88,7 @@ if(BUILD_TESTING)
   # 一个模块一个测试文件，全部链接同一个 leg_calc_core。
   # 文件名必须与 test/<name>.cpp 对应。
   set(leg_calc_tests
+    test_command_watchdog
     test_common_types
     test_foot_trajectory
     test_gait_phase_manager
