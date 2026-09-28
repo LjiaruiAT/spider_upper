@@ -15,11 +15,13 @@
 #include <robot_interfaces/msg/servo18.hpp>
 
 #include "leg_calc/common_types.hpp"
-#include "leg_calc/demo_chain.hpp"
 #include "leg_calc/foot_trajectory.hpp"
 #include "leg_calc/gait_phase_manager.hpp"
+#include "leg_calc/leg_chain.hpp"
 #include "leg_calc/leg_kinematics.hpp"
+#include "leg_calc/leg_layout.hpp"
 #include "leg_calc/servo18_mapper.hpp"
+#include "leg_calc/velocity_smoother.hpp"
 
 namespace {
 
@@ -52,63 +54,6 @@ leg_calc::BodyTwist to_body_twist(const geometry_msgs::msg::Twist& cmd) {
     body_twist.linear = Eigen::Vector3d(cmd.linear.x, cmd.linear.y, 0.0);
     body_twist.angular = Eigen::Vector3d(0.0, 0.0, cmd.angular.z);
     return body_twist;
-}
-
-struct StaticLayoutConfig {
-    double body_height_m{0.12};
-    double left_y_m{0.12};
-    double right_y_m{-0.12};
-    double front_x_m{0.18};
-    double middle_x_m{0.0};
-    double rear_x_m{-0.18};
-};
-
-StaticLayoutConfig load_leg_layout_config(const std::string& yaml_path) {
-    std::ifstream input(yaml_path);
-    if (!input.is_open()) {
-        throw std::runtime_error("Failed to open leg params file: " + yaml_path);
-    }
-
-    StaticLayoutConfig config;
-    std::string line;
-    while (std::getline(input, line)) {
-        const std::string trimmed = trim(line);
-        if (trimmed.empty() || trimmed[0] == '#') {
-            continue;
-        }
-
-        auto parse_mm_value = [&](const std::string& key, double& target) {
-            if (trimmed.rfind(key, 0) == 0) {
-                target = std::stod(trim(trimmed.substr(key.size()))) / 1000.0;
-                return true;
-            }
-            return false;
-        };
-
-        if (trimmed == "leg_params:") {
-            continue;
-        }
-        if (parse_mm_value("body_height_mm:", config.body_height_m)) {
-            continue;
-        }
-        if (parse_mm_value("default_left_y_mm:", config.left_y_m)) {
-            continue;
-        }
-        if (parse_mm_value("default_right_y_mm:", config.right_y_m)) {
-            continue;
-        }
-        if (parse_mm_value("front_x_mm:", config.front_x_m)) {
-            continue;
-        }
-        if (parse_mm_value("middle_x_mm:", config.middle_x_m)) {
-            continue;
-        }
-        if (parse_mm_value("rear_x_mm:", config.rear_x_m)) {
-            continue;
-        }
-    }
-
-    return config;
 }
 
 // 关节限位配置，单位：度（来自 YAML）。使用前会转成弧度。
@@ -224,7 +169,8 @@ public:
           sequence_(0),
           gait_config_(),
           gait_phase_manager_(gait_config_),
-          foot_trajectory_(gait_config_) {
+          foot_trajectory_(gait_config_),
+          velocity_smoother_(gait_config_) {
         RCLCPP_INFO(this->get_logger(), "leg_calc_node started");
         RCLCPP_INFO(this->get_logger(), "Current stage: gait phase -> foot trajectory -> body frame -> leg frame -> IK -> Servo18");
 
@@ -251,22 +197,29 @@ public:
 
         servo_target_publisher_ = this->create_publisher<robot_interfaces::msg::Servo18>("/spider/servo_target", 10);
 
-        demo_chain_ = leg_calc::build_demo_chain();
-        kinematics_ = std::make_shared<leg_calc::LegKinematics>(demo_chain_);
-        kinematics_->set_position_offset(Eigen::Vector3d(0.0, 0.0, 0.0));
-        // 径向可达区间来自链几何（推导见 demo_chain.hpp）：
-        // 目标点落在这个球壳之外时 IK 一定无解，可以在调用求解器前直接拒绝，
-        // 省掉一次注定失败的数值迭代。
-        kinematics_->set_reach_limits(leg_calc::kDemoChainMinReachM, leg_calc::kDemoChainMaxReachM);
-
         const auto spider_share = ament_index_cpp::get_package_share_directory("spider");
         servo_map_path_ = spider_share + "/config/servo_map.yaml";
         leg_params_path_ = spider_share + "/config/leg_params.yaml";
 
-        layout_config_ = load_leg_layout_config(leg_params_path_);
+        // 腿长来自配置，链在这里按实际尺寸构造——代码里不再有写死的杆长。
+        layout_config_ = leg_calc::load_leg_layout_from_yaml(leg_params_path_);
+        leg_chain_ = leg_calc::build_leg_chain(
+            layout_config_.coxa_length_m,
+            layout_config_.femur_length_m,
+            layout_config_.tibia_length_m);
+        kinematics_ = std::make_shared<leg_calc::LegKinematics>(leg_chain_);
+        kinematics_->set_position_offset(Eigen::Vector3d(0.0, 0.0, 0.0));
+
+        // 径向可达预检查**不启用**（保持 LegKinematics 的默认 (0, +inf)）。
+        //
+        // 原因：真实链带上关节限位之后，可达集合已经不是一个干净的球壳，
+        // 手工算出的区间要么太松（不起作用）、要么太紧（误拒合法姿态）。
+        // "解是否可信"统一交给 FK 回代误差 + 关节限位判断——这两道都是硬判据，
+        // 不依赖任何关于链形状的假设。
+
         joint_limits_ = to_joint_limits(load_joint_limits_config(leg_params_path_));
         servo_map_ = leg_calc::Servo18Mapper::load_map_from_yaml(servo_map_path_);
-        frame_bundle_ = build_frame_bundle(layout_config_);
+        frame_bundle_ = leg_calc::build_frame_bundle(layout_config_);
 
         foot_trajectory_.update_config(gait_config_);
         gait_phase_manager_.update_config(gait_config_);
@@ -292,11 +245,22 @@ public:
 
         RCLCPP_INFO(this->get_logger(), "Loaded leg layout from %s", leg_params_path_.c_str());
         RCLCPP_INFO(this->get_logger(), "Loaded servo_map from %s", servo_map_path_.c_str());
+        // 把腿几何和限位显式打出来——这是"配置到底有没有被真正用上"的唯一证据。
+        // （以前这里打印可达半径，现在预检查关掉了，改为打印杆长与归位姿态：
+        //   只要这几个数字不是图纸值，就说明配置没被读进去。）
         RCLCPP_INFO(
             this->get_logger(),
-            "链路校验: 可达半径 [%.1f, %.1f] mm, 关节限位(deg) coxa[%.0f,%.0f] femur[%.0f,%.0f] tibia[%.0f,%.0f]",
-            kinematics_->min_reach_m() * 1000.0,
-            kinematics_->max_reach_m() * 1000.0,
+            "腿几何: coxa=%.1f femur=%.1f tibia=%.1f mm (总展长 %.1f mm), 归位(腿局部)=[%.1f, %.1f, %.1f] mm",
+            layout_config_.coxa_length_m * 1000.0,
+            layout_config_.femur_length_m * 1000.0,
+            layout_config_.tibia_length_m * 1000.0,
+            (layout_config_.coxa_length_m + layout_config_.femur_length_m + layout_config_.tibia_length_m) * 1000.0,
+            layout_config_.home_local_m.x() * 1000.0,
+            layout_config_.home_local_m.y() * 1000.0,
+            layout_config_.home_local_m.z() * 1000.0);
+        RCLCPP_INFO(
+            this->get_logger(),
+            "关节限位(deg): coxa[%.0f,%.0f] femur[%.0f,%.0f] tibia[%.0f,%.0f]",
             joint_limits_.min(0) * 180.0 / 3.14159265358979323846,
             joint_limits_.max(0) * 180.0 / 3.14159265358979323846,
             joint_limits_.min(1) * 180.0 / 3.14159265358979323846,
@@ -309,18 +273,21 @@ public:
 
 private:
     leg_calc::BodyFootTargets build_nominal_body_targets() const {
-        // 中性姿态的目标足端位置统一定义在身体坐标系：
-        //   x：前后，y：左右，z：身体下方为负（这里使用 -body_height_m）。
-        // 这些目标还不是 IK 的输入；solve_joint_targets 会根据每条腿的安装位姿
-        // 转换成相应的腿局部坐标，再交给同一个单腿运动学对象。
+        // 归位姿态定义在**腿局部坐标系**里（配置字段 home_local_mm），
+        // 这里再用每条腿自己的安装位姿把它搬到身体坐标系。
+        //
+        // 为什么用腿局部坐标而不是身体坐标：
+        //   六条腿的局部 x 轴已经按各自的 yaw 转到朝外，所以"足端在髋轴外侧
+        //   多远、下方多深"对六条腿是同一个描述，一个向量就够。
+        //   而且这样得到的站姿天然是六条腿向外撑开的——如果反过来在身体系里
+        //   写"足端在安装点正下方"，腿就得先向外伸、再折回来，姿态既别扭、
+        //   又更容易顶到限位。
         leg_calc::BodyFootTargets targets;
 
         for (const auto leg_id : leg_calc::kAllLegIds) {
             const auto index = leg_calc::leg_index(leg_id);
-            targets.feet[index] = Eigen::Vector3d(
-                layout_x_for_leg(leg_id),
-                layout_y_for_leg(leg_id),
-                -layout_config_.body_height_m);
+            targets.feet[index] = leg_calc::leg_point_to_body_point(
+                layout_config_.home_local_m, frame_bundle_.leg_mounts[index]);
         }
 
         return targets;
@@ -369,30 +336,37 @@ private:
             1.0);
         const double motion_scale = leg_calc::quintic_ease(ramp_progress_);
 
-        // 已经彻底停下：回到标称站姿，并把步态相位复位，让下次起步总从相位 0 开始。
+        // 已经彻底停下：回到标称站姿，并复位相位与速度平滑器，
+        // 让下次起步总从"相位 0 + 零速度"开始。
         // 此时 motion_scale 已经是 0，步态输出本来就等于站姿，这个切换是无缝的。
         if (!wants_motion && ramp_progress_ <= 0.0) {
             gait_phase_manager_.reset();
+            velocity_smoother_.reset();
             publish_servo_target("stand", build_nominal_body_targets(), 0.0);
             return;
         }
 
-        // 停步过程中必须继续用**最后一条有效速度命令**，而不是当前的零命令。
+        // 速度平滑只在"想运动"时推进，两种情形要分开看：
         //
-        // 因为轨迹层的位移 = 速度 × 支撑相时长：命令一旦变成 0，步长立刻归零，
-        // 足端会在一个控制周期内塌回标称站姿（实测水平跳变 20mm），
-        // 而这时 motion_scale 还接近 1，根本来不及起作用。
-        // 正确的减速过程是"速度不变，把运动强度逐渐降到 0"。
+        //   · 起步 / 运行中改速度 —— 平滑地跟踪目标速度。
+        //     没有这一步，命令 0.2 → −0.2 会让步长在一个控制周期内从 +40mm
+        //     跳到 −40mm，足端一步跨出 80mm。
+        //
+        //   · 停步 —— **冻结**在当前速度，减速交给 motion_scale。
+        //     若这里也去跟踪零命令，步长会立刻归零、足端塌回标称站姿
+        //     （实测水平跳变 20mm），而那时 motion_scale 还接近 1，来不及起作用。
+        //
+        // 平滑器冻结的值同时也是"停步期间应继续使用的最后一条有效速度"，
+        // 所以不需要再单独缓存一份命令。
         if (wants_motion) {
-            last_motion_cmd_ = latest_cmd;
             warn_if_command_exceeds_capability(latest_cmd);
+            velocity_smoother_.update(to_body_twist(latest_cmd), control_period_sec_);
         }
-        const geometry_msgs::msg::Twist motion_cmd = wants_motion ? latest_cmd : last_motion_cmd_;
 
         gait_phase_manager_.tick(control_period_sec_);
         publish_servo_target(
             wants_motion ? "gait" : "gait_stop",
-            build_motion_body_targets(to_body_twist(motion_cmd), motion_scale),
+            build_motion_body_targets(velocity_smoother_.current(), motion_scale),
             motion_scale);
     }
 
@@ -592,18 +566,24 @@ private:
         servo_target_publisher_->publish(msg);
 
         // 命令快照走加锁读取，不要直接碰 latest_task_cmd_vel_（它受 task_cmd_mutex_ 保护）。
+        // 同时打印"收到的命令"和"实际采用的速度"：两者不同时才说明平滑器在起作用，
+        // 只看其中一个都无法判断这件事。
         const auto cmd = snapshot_latest_task_cmd_vel();
+        const auto& applied = velocity_smoother_.current();
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
             1000,
-            "[%s] scale=%.3f, body_frame=%s, task_cmd_vel=(%.3f, %.3f, %.3f), Servo18=%s",
+            "[%s] scale=%.3f, body_frame=%s, cmd=(%.3f, %.3f, %.3f), applied=(%.3f, %.3f, %.3f), Servo18=%s",
             tag.c_str(),
             motion_scale,
             frame_bundle_.body_frame.frame_id.c_str(),
             cmd.linear.x,
             cmd.linear.y,
             cmd.angular.z,
+            applied.linear.x(),
+            applied.linear.y(),
+            applied.angular.z(),
             leg_calc::Servo18Mapper::to_debug_string(servo_angles).c_str());
     }
 
@@ -623,50 +603,15 @@ private:
             msg->angular.z);
     }
 
-    double layout_x_for_leg(leg_calc::LegId leg_id) const {
-        switch (leg_id) {
-        case leg_calc::LegId::LeftFront:
-        case leg_calc::LegId::RightFront:
-            return layout_config_.front_x_m;
-        case leg_calc::LegId::LeftMiddle:
-        case leg_calc::LegId::RightMiddle:
-            return layout_config_.middle_x_m;
-        case leg_calc::LegId::LeftRear:
-        case leg_calc::LegId::RightRear:
-            return layout_config_.rear_x_m;
-        default:
-            return 0.0;
-        }
-    }
-
-    double layout_y_for_leg(leg_calc::LegId leg_id) const {
-        return leg_calc::is_left_leg(leg_id) ? layout_config_.left_y_m : layout_config_.right_y_m;
-    }
-
-    static leg_calc::SpiderFrameBundle build_frame_bundle(const StaticLayoutConfig& config) {
-        leg_calc::SpiderFrameBundle bundle;
-        bundle.body_frame.frame_id = "spider_base";
-
-        for (const auto leg_id : leg_calc::kAllLegIds) {
-            const auto index = leg_calc::leg_index(leg_id);
-            const Eigen::Vector3d origin(
-                (leg_id == leg_calc::LegId::LeftFront || leg_id == leg_calc::LegId::RightFront) ? config.front_x_m
-                : (leg_id == leg_calc::LegId::LeftMiddle || leg_id == leg_calc::LegId::RightMiddle) ? config.middle_x_m
-                                                                                                 : config.rear_x_m,
-                leg_calc::is_left_leg(leg_id) ? config.left_y_m : config.right_y_m,
-                0.0);
-            bundle.leg_mounts[index] = leg_calc::make_leg_mount_pose(leg_id, origin);
-        }
-
-        return bundle;
-    }
-
     uint8_t sequence_;
     leg_calc::GaitConfig gait_config_{};
     leg_calc::GaitPhaseManager gait_phase_manager_;
     leg_calc::FootTrajectory foot_trajectory_;
+    // 速度命令平滑器。它持有"当前速度"，必须是长期成员而不是每周期重建；
+    // 同时它也是停步减速阶段"最后一条有效速度"的来源（停步时被冻结）。
+    leg_calc::VelocitySmoother velocity_smoother_;
     geometry_msgs::msg::Twist latest_task_cmd_vel_{};
-    StaticLayoutConfig layout_config_{};
+    leg_calc::LegLayoutConfig layout_config_{};
     leg_calc::SpiderFrameBundle frame_bundle_{};
     leg_calc::JointLimits joint_limits_{};
     // 每条腿最近一次"可信"的关节解。遇到够不着 / 超关节限位 / 收敛失败时保留它，
@@ -675,7 +620,7 @@ private:
     // 每条腿是否曾经解出过可信解。用来区分"暂时够不着（保留上一帧）"和
     // "自启动就解不出来（配置有问题，只能输出零位）"。
     std::array<bool, leg_calc::kLegCount> has_trusted_joints_{};
-    KDL::Chain demo_chain_;
+    KDL::Chain leg_chain_;
     std::shared_ptr<leg_calc::LegKinematics> kinematics_;
     std::vector<leg_calc::ServoMapEntry> servo_map_{};
     std::string servo_map_path_;
@@ -689,8 +634,6 @@ private:
     double motion_ramp_duration_sec_{1.0};
     // 运动强度过渡的进度 [0, 1]。实际强度 = quintic_ease(ramp_progress_)。
     double ramp_progress_{0.0};
-    // 最后一条非零速度命令，供停步减速阶段继续使用。
-    geometry_msgs::msg::Twist last_motion_cmd_{};
 };
 
 int main(int argc, char** argv) {

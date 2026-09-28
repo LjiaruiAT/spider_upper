@@ -20,11 +20,13 @@ find_package(robot_interfaces REQUIRED)
 #     也保证测试验证的就是实际运行的那份代码
 # ---------------------------------------------------------------------------
 add_library(leg_calc_core STATIC
-  src/demo_chain.cpp
   src/foot_trajectory.cpp
   src/gait_phase_manager.cpp
+  src/leg_chain.cpp
   src/leg_kinematics.cpp
+  src/leg_layout.cpp
   src/servo18_mapper.cpp
+  src/velocity_smoother.cpp
 )
 
 target_include_directories(leg_calc_core
@@ -89,8 +91,11 @@ if(BUILD_TESTING)
     test_foot_trajectory
     test_gait_phase_manager
     test_gait_types
+    test_leg_chain
     test_leg_kinematics
+    test_leg_layout
     test_servo18_mapper
+    test_velocity_smoother
   )
 
   foreach(test_name IN LISTS leg_calc_tests)

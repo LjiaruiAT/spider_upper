@@ -7,17 +7,15 @@
 //      配合正常的返回码，看起来像成功了。
 //   2. IK 的返回码不是可信度证明，必须用 FK 回代验证。
 //
-// 本文件把这两条钉成断言，并把 demo 链的可达工作空间（球壳）写成测试。
-//
-// 注意：这里测的是 demo 链，不是真实机械腿。等真实链结构确定后，
-// 需要同步更新可达区间常量，并确认 IK 仍在合理构型下收敛。
+// 本文件测的是 LegKinematics 这个**类的行为**，因此刻意用一条
+// 自造参数的链，不绑定任何真实的机械尺寸——真实腿几何的测试在
+// test_leg_chain.cpp 里。
 
 #include <gtest/gtest.h>
 
-#include <algorithm>
 #include <cmath>
 
-#include "leg_calc/demo_chain.hpp"
+#include "leg_calc/leg_chain.hpp"
 #include "leg_calc/leg_kinematics.hpp"
 
 namespace {
@@ -27,21 +25,13 @@ using leg_calc::LegKinematics;
 
 constexpr double kPi = 3.14159265358979323846;
 
-// demo 链的几何：把后两段合并成一个定长向量
-//   joint3 的平移 [0.12, 0, -0.02] + foot 的平移 [0.10, 0, -0.10]
-//   = [0.22, 0, -0.12]，长度 0.25060 m
-// 第一段长度 0.06 m，所以两个向量之和的长度范围是：
-//   最小 |0.25060 - 0.06| = 0.19060 m   （两向量反向）
-//   最大 0.25060 + 0.06   = 0.31060 m   （两向量同向）
-// 再考虑 q0 绕 z 轴旋转，可达集合就是半径落在这个区间的**球壳**。
-const double kFirstLinkM = 0.06;
-const double kSecondLinkM = std::sqrt(0.22 * 0.22 + 0.12 * 0.12);
-const double kMinReachM = kSecondLinkM - kFirstLinkM;
-const double kMaxReachM = kSecondLinkM + kFirstLinkM;
-
-// 节点运行时用的是 demo_chain.hpp 里那两个常量。它们必须和链的真实几何一致，
-// 所以这里把它们和上面推导出来的值对照一次；下面还有一条密集采样测试，
-// 用来拦住"改了链却忘了改常量"这种情况。
+// 测试用链：coxa 0.06 / femur 0.12 / tibia 0.14（米）。
+// 可达集合可以解析写出来——末端两段整体挂在距原点 0.06 处，绕 y 轴自由转动，
+// 所以可达点满足 |p − (0.06, 0, 0)| ∈ [0.02, 0.26]：一个**圆盘**，不是球壳。
+// 全展长（q=0）时足端落在 (0.32, 0, 0)。
+LegKinematics make_kinematics() {
+    return LegKinematics(leg_calc::build_leg_chain(0.06, 0.12, 0.14));
+}
 
 struct SolveOutcome {
     Eigen::Vector3d achieved{Eigen::Vector3d::Zero()};  // FK 回代得到的足端位置
@@ -62,35 +52,12 @@ SolveOutcome solve(LegKinematics& kinematics, const Eigen::Vector3d& target) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// 正运动学的手算对照
-//
-// 用文档里反复出现的那组角验证 FK：
-//   q = [0, -pi/2, 2.6422]
-// 手算过程：
-//   Ry(-pi/2)·[0.06,0,0]              = [0, 0, 0.06]
-//   Ry(2.6422)·[0.22,0,-0.12]         ≈ [-0.2506, 0, 0.0000]
-//   Ry(-pi/2) 作用于它                 ≈ [0.0000, 0, -0.2506]
-//   合计 ≈ [0, 0, -0.1906]
-// ---------------------------------------------------------------------------
-TEST(LegKinematicsTest, ForwardKinematicsMatchesHandCalculation) {
-    LegKinematics kinematics(leg_calc::build_demo_chain());
-
-    const JointVector joints = (JointVector() << 0.0, -kPi / 2.0, 2.6422).finished();
-    const Eigen::Vector3d foot = kinematics.forward_position(joints);
-
-    EXPECT_NEAR(foot.x(), 0.0, 1e-4);
-    EXPECT_NEAR(foot.y(), 0.0, 1e-12);
-    EXPECT_NEAR(foot.z(), -kMinReachM, 1e-4)
-        << "这组角应把腿收到最紧，足端落在最小可达半径处";
-}
-
-// ---------------------------------------------------------------------------
 // 可达点：IK + FK 回代
 // ---------------------------------------------------------------------------
 TEST(LegKinematicsTest, ReachableTargetIsSolvedAccurately) {
-    LegKinematics kinematics(leg_calc::build_demo_chain());
+    LegKinematics kinematics = make_kinematics();
 
-    // 250mm 落在可达区间 [190.6, 310.6] 内部
+    // 0.25 m 落在 [0, 0.32] 内部
     const SolveOutcome outcome = solve(kinematics, Eigen::Vector3d(0.0, 0.0, -0.25));
 
     EXPECT_GE(outcome.code, 0) << "可达点不应返回错误码";
@@ -98,51 +65,45 @@ TEST(LegKinematicsTest, ReachableTargetIsSolvedAccurately) {
         << "可达点的 FK 回代误差应接近 0，实际 = " << outcome.error_norm * 1000.0 << " mm";
 }
 
-TEST(LegKinematicsTest, TargetsJustInsideWorkspaceAreReachable) {
-    LegKinematics kinematics(leg_calc::build_demo_chain());
-
-    // 比最小可达半径大 10mm
-    const SolveOutcome outcome = solve(kinematics, Eigen::Vector3d(0.0, 0.0, -(kMinReachM + 0.01)));
-
-    EXPECT_GE(outcome.code, 0);
-    EXPECT_LT(outcome.error_norm, 1e-6);
-}
-
 // ---------------------------------------------------------------------------
 // 不可达点：求解器不会说"无解"，而是落到工作空间边界
 //
 // 这是最容易被忽视的坑：KDL 会返回一个关节向量，调用方如果只看
 // "有没有返回结果"，就会把"够不着"当成"解出来了"。
-// 所以必须用 FK 回代误差来判断。
 // ---------------------------------------------------------------------------
-TEST(LegKinematicsTest, TargetInsideMinReachLandsOnWorkspaceBoundary) {
-    LegKinematics kinematics(leg_calc::build_demo_chain());
+TEST(LegKinematicsTest, UnreachableTargetLandsOnWorkspaceBoundary) {
+    LegKinematics kinematics = make_kinematics();
 
-    // 120mm 比最小可达半径 190.6mm 还小，物理上够不着
-    const Eigen::Vector3d target(0.0, 0.0, -0.12);
+    // 这条链的可达集合不是"以原点为心的球壳"，而是**以髋关节位置为心的圆盘**：
+    // 末端两段（femur 0.12 + tibia 0.14）整体挂在距原点 0.06 处，
+    // 所以可达点满足 |p − (0.06, 0, 0)| ∈ [|0.12−0.14|, 0.12+0.14]。
+    const Eigen::Vector3d femur_joint(0.06, 0.0, 0.0);
+    constexpr double kOuterRadius = 0.12 + 0.14;
+
+    // 目标离那个圆心 0.40+ m，超出外径 0.26，物理上伸不到
+    const Eigen::Vector3d target(0.0, 0.0, -0.40);
     const SolveOutcome outcome = solve(kinematics, target);
 
-    EXPECT_LT(outcome.code, 0) << "不可达目标应返回错误码（demo 链上通常是 -101）";
+    EXPECT_LT(outcome.code, 0) << "不可达目标应返回错误码";
 
-    // 求解器会把腿收到最紧、朝正下方，也就是落在最小可达半径上
-    EXPECT_NEAR(outcome.achieved.norm(), kMinReachM, 1e-4);
+    // 求解器会把腿伸到最直，也就是停在可达集合的**外边界**上
+    EXPECT_NEAR((outcome.achieved - femur_joint).norm(), kOuterRadius, 1e-4)
+        << "求解器应该停在可达外边界上，实际停在 " << (outcome.achieved - femur_joint).norm();
 
-    // 误差 = 190.6 - 120 = 70.6 mm。这个数字在真实的调参过程中出现过，
-    // 它同时也是"目标点不可达"的定量证据。
-    EXPECT_NEAR(outcome.error_norm, kMinReachM - 0.12, 1e-3);
+    // 误差 = 目标到可达边界的距离，可以直接解析算出来
+    const double distance_to_centre = (target - femur_joint).norm();
+    EXPECT_NEAR(outcome.error_norm, distance_to_centre - kOuterRadius, 1e-3);
 }
 
-TEST(LegKinematicsTest, TargetsInsideTheShellAreNeverReportedAsAccurate) {
-    LegKinematics kinematics(leg_calc::build_demo_chain());
+// 反向验证：不可达时**不能**报出很小的回代误差。
+// 如果哪天有人把判据改成"看返回码"，这条会立刻失败。
+TEST(LegKinematicsTest, UnreachableTargetsNeverReportSmallResidual) {
+    LegKinematics kinematics = make_kinematics();
 
-    // 球壳内部的一系列点：全部不可达，且误差都应等于"到最近边界的距离"
-    for (const double radius : {0.05, 0.10, 0.15, 0.18}) {
-        const SolveOutcome outcome = solve(kinematics, Eigen::Vector3d(0.0, 0.0, -radius));
-
+    for (const double distance : {0.35, 0.40, 0.60}) {
+        const SolveOutcome outcome = solve(kinematics, Eigen::Vector3d(0.0, 0.0, -distance));
         EXPECT_GT(outcome.error_norm, 1e-3)
-            << "r=" << radius << " 位于球壳内部，本次却报出了很小的回代误差";
-        EXPECT_NEAR(outcome.error_norm, kMinReachM - radius, 1e-3)
-            << "r=" << radius << " 的误差应等于到最小可达半径的距离";
+            << "distance=" << distance << " 超出了工作空间，本次却报出了很小的回代误差";
     }
 }
 
@@ -153,9 +114,8 @@ TEST(LegKinematicsTest, TargetsInsideTheShellAreNeverReportedAsAccurate) {
 // 设置非零偏移之后 FK(IK(p)) 仍然应该回到 API 坐标下的 p。
 // ---------------------------------------------------------------------------
 TEST(LegKinematicsTest, PositionOffsetIsSymmetricBetweenIkAndFk) {
-    LegKinematics kinematics(leg_calc::build_demo_chain());
-    const Eigen::Vector3d offset(0.0, 0.0, -0.01);
-    kinematics.set_position_offset(offset);
+    LegKinematics kinematics = make_kinematics();
+    kinematics.set_position_offset(Eigen::Vector3d(0.0, 0.0, -0.01));
 
     // 注意：offset 会被加到 IK 的内部目标上，所以这里是 API 坐标系下的点
     const Eigen::Vector3d target(0.0, 0.0, -0.24);
@@ -175,7 +135,7 @@ TEST(LegKinematicsTest, PositionOffsetIsSymmetricBetweenIkAndFk) {
 // 在非奇异的构型上，来回一次应该保持一致。
 // ---------------------------------------------------------------------------
 TEST(LegKinematicsTest, VelocityMappingRoundTripsAtRegularConfiguration) {
-    LegKinematics kinematics(leg_calc::build_demo_chain());
+    LegKinematics kinematics = make_kinematics();
 
     // 一个远离奇异的一般构型
     const JointVector joints = (JointVector() << 0.10, 1.20, 0.60).finished();
@@ -189,30 +149,28 @@ TEST(LegKinematicsTest, VelocityMappingRoundTripsAtRegularConfiguration) {
 }
 
 // ---------------------------------------------------------------------------
-// 径向可达区间：把"球壳判据"从测试搬进运行路径
+// 径向可达预检查
 //
-// 预判的价值是省掉一次注定失败的数值迭代（LMA 最多 150 次 × 6 条腿）。
-// 但它只是**必要条件**，所以解是否可信最终仍以 FK 回代误差为准。
+// 这里用显式指定的上下界（与链的真实几何无关），测的是 API 的语义。
+// 现有节点**不启用**它——真实链带上关节限位后可达集合不再是干净球壳。
+// 但接口本身仍要被测，所以这些用例保留。
 // ---------------------------------------------------------------------------
 TEST(LegKinematicsTest, ReachLimitsGateTheSolver) {
-    LegKinematics kinematics(leg_calc::build_demo_chain());
-    kinematics.set_reach_limits(leg_calc::kDemoChainMinReachM, leg_calc::kDemoChainMaxReachM);
+    LegKinematics kinematics = make_kinematics();
+    kinematics.set_reach_limits(0.10, 0.30);
 
-    // 球壳内部（够不着）
-    EXPECT_FALSE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -0.12)));
-    // 球壳外部（伸不到）
-    EXPECT_FALSE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -0.35)));
-    // 球壳内部（可达）
-    EXPECT_TRUE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -0.25)));
-    // 边界（闭区间，算可达）
-    EXPECT_TRUE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -leg_calc::kDemoChainMinReachM)));
-    EXPECT_TRUE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -leg_calc::kDemoChainMaxReachM)));
+    EXPECT_FALSE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -0.05))) << "下界以内";
+    EXPECT_TRUE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -0.20))) << "区间内";
+    EXPECT_FALSE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -0.35))) << "上界以外";
+    // 闭区间：正好落在边界上算可达
+    EXPECT_TRUE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -0.10)));
+    EXPECT_TRUE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -0.30)));
 }
 
 // 可达半径是**斜边长度**，与方向无关
 TEST(LegKinematicsTest, ReachCheckIsDirectionIndependent) {
-    LegKinematics kinematics(leg_calc::build_demo_chain());
-    kinematics.set_reach_limits(leg_calc::kDemoChainMinReachM, leg_calc::kDemoChainMaxReachM);
+    LegKinematics kinematics = make_kinematics();
+    kinematics.set_reach_limits(0.10, 0.30);
 
     const double radius = 0.25;
     EXPECT_TRUE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -radius)));
@@ -222,54 +180,20 @@ TEST(LegKinematicsTest, ReachCheckIsDirectionIndependent) {
 
 // 预判必须和 inverse_position 用同一个坐标约定：可达性针对"加上 offset 之后"的目标
 TEST(LegKinematicsTest, ReachCheckAccountsForPositionOffset) {
-    LegKinematics kinematics(leg_calc::build_demo_chain());
-    kinematics.set_reach_limits(leg_calc::kDemoChainMinReachM, leg_calc::kDemoChainMaxReachM);
+    LegKinematics kinematics = make_kinematics();
+    kinematics.set_reach_limits(0.10, 0.30);
     kinematics.set_position_offset(Eigen::Vector3d(0.0, 0.0, -0.01));
 
     // API 坐标 0.24 + offset 0.01 = 内部目标 0.25，可达
     EXPECT_TRUE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -0.24)));
-    // 0.12 + 0.01 = 0.13，仍然在球壳内，不可达
-    EXPECT_FALSE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -0.12)));
+    // 0.05 + 0.01 = 0.06，低于下界
+    EXPECT_FALSE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -0.05)));
 }
 
 // 默认不启用预判：任何点都算"在范围内"，行为与加预判之前一致
 TEST(LegKinematicsTest, ReachCheckIsDisabledByDefault) {
-    LegKinematics kinematics(leg_calc::build_demo_chain());
+    LegKinematics kinematics = make_kinematics();
 
     EXPECT_TRUE(kinematics.is_within_reach(Eigen::Vector3d(0.0, 0.0, -0.01)));
     EXPECT_TRUE(kinematics.is_within_reach(Eigen::Vector3d(10.0, 0.0, 0.0)));
-}
-
-// ---------------------------------------------------------------------------
-// demo_chain.hpp 里的可达区间常量必须与链的实际几何一致
-//
-// 做法是密集采样：在关节空间上撒点，用 FK 算出 |p| 的最小 / 最大值。
-// 采样精度足以把误差压到 1e-5 量级，所以一旦有人改了链里的杆长却忘了
-// 同步常量，这条断言会立刻失败。
-// ---------------------------------------------------------------------------
-TEST(DemoChainTest, ReachConstantsMatchTheActualChain) {
-    LegKinematics kinematics(leg_calc::build_demo_chain());
-
-    double min_radius = 1e9;
-    double max_radius = 0.0;
-    constexpr int kQ1Samples = 64;
-    constexpr int kQ2Samples = 2000;
-
-    for (int i = 0; i < kQ1Samples; ++i) {
-        const double q1 = 2.0 * kPi * static_cast<double>(i) / kQ1Samples;
-        for (int j = 0; j < kQ2Samples; ++j) {
-            const double q2 = 2.0 * kPi * static_cast<double>(j) / kQ2Samples;
-            const JointVector joints = (JointVector() << 0.0, q1, q2).finished();
-            const double radius = kinematics.forward_position(joints).norm();
-            min_radius = std::min(min_radius, radius);
-            max_radius = std::max(max_radius, radius);
-        }
-    }
-
-    // 采样只会"够不到"极值（采样值 >= 真实最小值、<= 真实最大值），
-    // 所以用 1e-5 的容差就足以判定常量是否写对。
-    EXPECT_NEAR(min_radius, leg_calc::kDemoChainMinReachM, 1e-5)
-        << "最小可达半径与 demo_chain.hpp 里的常量不一致：改了链的杆长就要重算常量";
-    EXPECT_NEAR(max_radius, leg_calc::kDemoChainMaxReachM, 1e-5)
-        << "最大可达半径与 demo_chain.hpp 里的常量不一致";
 }

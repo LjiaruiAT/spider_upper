@@ -5,7 +5,6 @@
 #include <kdl/chain.hpp>
 #include <kdl/chainfksolverpos_recursive.hpp>
 #include <kdl/chainiksolverpos_lma.hpp>
-#include <kdl/chainiksolvervel_pinv.hpp>
 #include <kdl/chainjnttojacsolver.hpp>
 #include <kdl/frames.hpp>
 #include <kdl/jacobian.hpp>
@@ -66,10 +65,9 @@ private:
     static JointMatrix extract_position_jacobian(const KDL::Jacobian& full_jacobian);
 
     KDL::Chain chain_;
-    // 三类 solver 分别负责位置 FK、Jacobian、位置/速度逆解；cache 避免重复申请 Jacobian 容器。
+    // 三类 solver 分别负责位置 FK、Jacobian、位置逆解；cache 避免重复申请 Jacobian 容器。
     KDL::ChainFkSolverPos_recursive fk_solver_;
     KDL::ChainJntToJacSolver jacobian_solver_;
-    KDL::ChainIkSolverVel_pinv velocity_solver_;
     KDL::ChainIkSolverPos_LMA ik_solver_;
 
     KDL::Jacobian jacobian_cache_;

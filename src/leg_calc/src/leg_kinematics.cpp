@@ -11,7 +11,6 @@ LegKinematics::LegKinematics(const KDL::Chain& chain)
     : chain_(chain),
       fk_solver_(chain_),
       jacobian_solver_(chain_),
-      velocity_solver_(chain_),
       // KDL 的 6 个任务维度为 [x, y, z, rotation_x, rotation_y, rotation_z]。
       // 这里权重为 [1,1,1,0,0,0]，表示只要求位置，不约束末端姿态。
       // 1e-6 是 LMA 的误差收敛阈值，150 是最大迭代次数，1e-10 是关节增量收敛阈值。
