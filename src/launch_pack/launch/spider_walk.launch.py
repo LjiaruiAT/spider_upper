@@ -23,8 +23,8 @@
     ros2 topic pub -r 20 /spider/cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.2}}'
 
 想看转弯（半径 = v / w，能明显看出走的是圆弧）：
-    ros2 topic pub -r 20 /spider/cmd_vel geometry_msgs/msg/Twist \\
-        '{linear: {x: 0.2}, angular: {z: 0.3}}'
+ros2 topic pub -r 20 /spider/cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.2}, angular: {z: 0.3}}'
+
 
 ⚠ odom 是**按命令速度推算**的，不是传感器测出来的（见 leg_calc 的
    odometry_integrator.hpp）。真机上脚打滑时它会偏，所以只当可视化看，
@@ -35,8 +35,9 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 
 
 def generate_launch_description():
@@ -47,8 +48,24 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        # 透传给 spider_display：这里声明一次，命令行才能传
+        # `gait_pattern:=wave` / `use_rviz:=false`。
+        DeclareLaunchArgument(
+            'gait_pattern',
+            default_value='tripod',
+            description='步态模式：tripod / ripple / wave；透传给 leg_calc_node',
+        ),
+        DeclareLaunchArgument(
+            'use_rviz',
+            default_value='true',
+            description='是否启动 RViz；false 时只启动数据与 TF',
+        ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(display_launch),
-            launch_arguments={'rviz_config': 'spider_walk.rviz'}.items(),
+            launch_arguments={
+                'rviz_config': 'spider_walk.rviz',
+                'gait_pattern': LaunchConfiguration('gait_pattern'),
+                'use_rviz': LaunchConfiguration('use_rviz'),
+            }.items(),
         ),
     ])

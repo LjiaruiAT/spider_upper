@@ -11,6 +11,8 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <stdexcept>
+#include <string>
 
 #include "leg_calc/gait_types.hpp"
 
@@ -18,9 +20,11 @@ namespace {
 
 using leg_calc::GaitConfig;
 using leg_calc::GaitPattern;
+using leg_calc::gait_pattern_name;
 using leg_calc::max_forward_speed_mps;
 using leg_calc::max_lateral_speed_mps;
 using leg_calc::max_turn_rate_rps;
+using leg_calc::parse_gait_pattern;
 using leg_calc::quintic_ease;
 using leg_calc::stance_duration_s;
 using leg_calc::stance_duty;
@@ -43,6 +47,31 @@ double one_sided_derivative_at_one(double h) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// 步态名称 <-> 枚举
+//
+// 节点的 gait_pattern 参数与启动打印都走这两个函数。
+// 解析必须严格（大小写敏感、非法值抛异常）——配置写错时宁可启动失败，
+// 也不要静默退回 Tripod 却让人以为在跑 Wave。
+// ---------------------------------------------------------------------------
+TEST(GaitPatternNameTest, ParseAcceptsTheThreeNames) {
+    EXPECT_EQ(parse_gait_pattern("tripod"), GaitPattern::Tripod);
+    EXPECT_EQ(parse_gait_pattern("ripple"), GaitPattern::Ripple);
+    EXPECT_EQ(parse_gait_pattern("wave"), GaitPattern::Wave);
+}
+
+TEST(GaitPatternNameTest, ParseRejectsUnknownNames) {
+    for (const char* bad : {"", "Tripod", "WAVE", "walk", "0"}) {
+        EXPECT_THROW(parse_gait_pattern(bad), std::invalid_argument) << "bad=" << bad;
+    }
+}
+
+TEST(GaitPatternNameTest, NameRoundTripsThroughParse) {
+    for (const auto pattern : {GaitPattern::Tripod, GaitPattern::Ripple, GaitPattern::Wave}) {
+        EXPECT_EQ(parse_gait_pattern(gait_pattern_name(pattern)), pattern);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // stance_duty：支撑相占整个步态周期的比例

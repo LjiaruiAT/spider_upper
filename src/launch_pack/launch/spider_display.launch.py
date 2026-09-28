@@ -93,6 +93,14 @@ def generate_launch_description():
                         'spider.rviz = 固定坐标系 spider_base（看腿动），'
                         'spider_walk.rviz = 固定坐标系 odom（看机器人走）',
         ),
+        # 步态选择：tripod / ripple / wave（默认 tripod）。
+        # 只支持启动时选择（运行中切换会让相位映射突变，见 leg_calc 的说明）。
+        # 例：ros2 launch launch_pack spider_walk.launch.py gait_pattern:=wave
+        DeclareLaunchArgument(
+            'gait_pattern',
+            default_value='tripod',
+            description='步态模式：tripod / ripple / wave；透传给 leg_calc_node',
+        ),
         Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
@@ -111,6 +119,7 @@ def generate_launch_description():
             executable='leg_calc_node',
             name='leg_calc_node',
             output='screen',
+            parameters=[{'gait_pattern': LaunchConfiguration('gait_pattern')}],
         ),
         Node(
             package='rviz2',

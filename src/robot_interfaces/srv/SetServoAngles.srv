@@ -1,0 +1,20 @@
+# 手动调试：一次设置一个或多个舵机通道的目标角度。
+#
+# 这是"绕过数学链直接跟舵机对话"的入口：通道号对应 Servo18 的下标（0~17），
+# 角度单位 0.1°（合法区间 [0, 1800]，与下位机 ClampAngleDdeg 一致）。
+#
+# channels 与 angles 一一对应：长度必须相同、不能为空；任何一路非法时
+# **整条请求都不生效**（避免"改了一半"这种难以排查的中间状态）。
+#
+# 例：单腿调试——一次设置左前腿的三路（coxa / femur / tibia）
+#   channels: [0, 1, 2]
+#   angles:   [900, 800, 900]
+#
+# 例：只动 1 号通道（lf femur）到 80.0°
+#   channels: [1]
+#   angles:   [800]
+uint8[] channels
+int16[] angles
+---
+bool success
+string message

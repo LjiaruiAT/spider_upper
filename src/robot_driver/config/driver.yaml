@@ -1,6 +1,20 @@
-# robot_driver transport placeholder configuration.
-driver:
-  device_name: /dev/ttyACM0
-  baud_rate: 115200
-  fake_send: true
-  readback_enabled: false
+# robot_driver 的运行参数。
+#
+# 这是一个 **ROS 参数文件**（顶层是节点名，下面是 ros__parameters），
+# 由 launch 传给 robot_driver_node。与 spider 包里的"机器人属性配置"
+# （leg_params / servo_map，节点自己解析）刻意不同：
+#   · 机器人属性：几何、映射、标定 —— 被多个程序共读，放 spider 包；
+#   · 节点运行参数：设备名、波特率、开关 —— 跟节点绑定，用 ROS 参数文件，
+#     启动时可以只覆盖单个值：
+#       ros2 run robot_driver robot_driver_node --ros-args -p device_name:=/dev/ttyUSB0
+#
+# 当前状态：真实串口尚未接入。
+#   · fake_send 必须保持 true（false 会启动失败——真实发送还没实现，
+#     静默降级会让人以为正在真发送）；
+#   · readback_enabled 必须保持 false（同上，回读未实现）。
+robot_driver_node:
+  ros__parameters:
+    device_name: /dev/ttyACM0
+    baud_rate: 115200
+    fake_send: true
+    readback_enabled: false

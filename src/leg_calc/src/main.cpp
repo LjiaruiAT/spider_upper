@@ -195,6 +195,18 @@ public:
             motion_ramp_duration_sec_ = 1.0;
         }
 
+        // 步态模式：tripod / ripple / wave。
+        //
+        // 只支持**启动时**选择，不支持运行中切换。原因：切换时每条腿的相位映射
+        // 会突变（Tripod 是"半个周期一换组"，Wave 是"1/6 周期窗口"），
+        // 足端目标会在一个控制周期内跳到别处。要做运行中切换得先设计过渡机制。
+        //
+        // 配置写错时直接抛异常让启动失败，不静默退回 Tripod——
+        // 那会让人以为在跑 Wave，实际在跑 Tripod，而日志和波形都看不出区别。
+        declare_parameter<std::string>("gait_pattern", "tripod");
+        gait_config_.pattern =
+            leg_calc::parse_gait_pattern(this->get_parameter("gait_pattern").as_string());
+
         // 命令看门狗的超时。默认 0.25s 与 spider_task 的 cmd_vel_timeout_sec 一致，
         // 而 spider_task 的发布周期是 20ms——0.25s 相当于容忍连丢 12 拍，
         // 正常抖动绝不会触发。<= 0 表示关闭看门狗。
@@ -209,6 +221,17 @@ public:
             "/spider/task_cmd_vel",
             10,
             std::bind(&LegCalcNode::task_cmd_vel_callback, this, std::placeholders::_1));
+
+        // 检查 /spider/servo_target 上是否已有别的发布者（典型：手动调试节点
+        // manual_servo_node 还在跑）。两个发布者会让 driver 收到两路帧的交错，
+        // 真机上就是两个控制源打架。必须在自己创建 publisher **之前**查，
+        // 否则会把自己也算进去。
+        if (this->count_publishers("/spider/servo_target") > 0) {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "/spider/servo_target 上已有其他发布者（可能是手动调试节点 manual_servo_node）。"
+                "两个发布者会互相覆盖——请先停掉手动调试再运行 leg_calc。");
+        }
 
         servo_target_publisher_ = this->create_publisher<robot_interfaces::msg::Servo18>("/spider/servo_target", 10);
 
@@ -254,9 +277,9 @@ public:
         // 只是命令与现实脱节——所以这个数字必须一开始就可见。
         RCLCPP_INFO(
             this->get_logger(),
-            "Gait capability: pattern=%d, frequency=%.2f Hz, stance_duration=%.3f s, "
+            "Gait capability: pattern=%s, frequency=%.2f Hz, stance_duration=%.3f s, "
             "step_limit=%.1f mm -> max_speed=%.3f m/s, max_lateral=%.3f m/s, max_turn=%.3f rad/s",
-            static_cast<int>(gait_config_.pattern),
+            leg_calc::gait_pattern_name(gait_config_.pattern),
             gait_config_.frequency_hz,
             leg_calc::stance_duration_s(gait_config_),
             gait_config_.step_length_m * 1000.0,

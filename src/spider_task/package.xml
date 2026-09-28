@@ -9,9 +9,13 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <depend>ament_index_cpp</depend>
   <depend>geometry_msgs</depend>
   <depend>rclcpp</depend>
   <depend>robot_interfaces</depend>
+
+  <!-- 手动调试节点在运行时读 spider/config/default_pose.yaml（初值姿态）。 -->
+  <exec_depend>spider</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

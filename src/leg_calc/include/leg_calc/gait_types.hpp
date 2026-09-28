@@ -1,16 +1,54 @@
 #pragma once
 
 #include <cstddef>
+#include <stdexcept>
+#include <string>
 
 namespace leg_calc {
 
 // 步态模式。它只决定每条腿处于支撑相还是摆动相；真正的足端位置
 // 由 FootTrajectory 根据相位和速度命令继续计算，最后才进入 IK。
+//
+// 三种步态都可用，启动时通过 ROS 参数 `gait_pattern` 选择（见节点与 5.18 节）。
+// 它们的区别只在"同时有几条腿摆动"，这决定了支撑相占比、进而决定速度上限：
+//   支撑相占比  Tripod 1/2 < Ripple 2/3 < Wave 5/6
+//   速度上限    Tripod 最高       Ripple 中       Wave 最低
 enum class GaitPattern {
-    Tripod,  // 三足步态：LF+LR+RM vs RF+RR+LM，交替支撑
-    Ripple,  // 波纹步态：每次移动 2 条腿（预留）
-    Wave,    // 波动步态：每次移动 1 条腿（预留）
+    Tripod,  // 三足步态：LF+LR+RM vs RF+RR+LM，交替支撑（最快，默认）
+    Ripple,  // 波纹步态：每次移动 2 条腿（稳定性与速度的折中）
+    Wave,    // 波动步态：每次移动 1 条腿（最稳，但速度上限最低）
 };
+
+// 步态名称 <-> 枚举的互转。
+// 节点的 gait_pattern 参数与启动打印都走这两个函数，
+// 保证"配置里写的字符串"和"日志里打的名字"来自同一处定义，不会对不上。
+inline const char* gait_pattern_name(GaitPattern pattern) {
+    switch (pattern) {
+    case GaitPattern::Tripod:
+        return "tripod";
+    case GaitPattern::Ripple:
+        return "ripple";
+    case GaitPattern::Wave:
+        return "wave";
+    }
+    return "unknown";
+}
+
+// 解析失败抛 std::invalid_argument——与 leg_layout 对配置错误的处理一致：
+// 宁可启动失败，也不要静默退回默认步态（那会让人以为在跑 Wave，实际在跑 Tripod）。
+inline GaitPattern parse_gait_pattern(const std::string& name) {
+    if (name == "tripod") {
+        return GaitPattern::Tripod;
+    }
+    if (name == "ripple") {
+        return GaitPattern::Ripple;
+    }
+    if (name == "wave") {
+        return GaitPattern::Wave;
+    }
+    throw std::invalid_argument(
+        "Unknown gait pattern: '" + name + "' (expected tripod / ripple / wave)");
+}
 
 // 步态配置参数。速度命令不直接存放在这里；这些字段决定轨迹的尺度、周期和上限。
 //
