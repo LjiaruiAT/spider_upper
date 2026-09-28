@@ -62,6 +62,61 @@ LINK_MESHES = {
     "tibia": "tibia.stl",
 }
 
+# ---------------------------------------------------------------------------
+# 舵机
+# ---------------------------------------------------------------------------
+# ⚠ mg996r.stl 和连杆 mesh 的约定**不一样**，混用会画错：
+#   · 单位是**毫米**（连杆是米）→ 必须写 scale="0.001"
+#   · 原点在本体中心（含安装耳）→ 必须靠 origin 把本体挪到安装位
+# 尺寸实测 54.2 × 20.0 × 46.5 mm（含耳 / 含输出轴），与 MG996R 实物吻合。
+SERVO_MESH = "mg996r.stl"
+SERVO_SCALE = 0.001
+
+# 髋部舵机**装配体（含安装耳）包围盒中心**在 coxa_link 帧里的位置（mm，图纸实测）。
+# 来源：Hexapod-Leg_v2.FCStd 里 `Arm` 容器的 MG996R 装配体（11 个零件）在图纸
+# 全局坐标里的包围盒是 x -27.10~27.10、y -13.17~6.83、z -1.41~45.22，
+# 中心 (0, -3.17, 21.90)。coxa_link 帧的原点 = 髋关节轴 = 髋舵机输出轴，
+# 在图纸全局 (10.10, -3.17, 15.33)（见 export_cad_meshes.py 文件头 ②）。
+# 所以舵机中心在 coxa 帧里 = (0,-3.17,21.90) − (10.10,-3.17,15.33)。
+#
+# ⚠ 独立校验（不是循环论证）：MG996R 的输出轴偏离本体中心 10.10mm（x 方向，
+#   轴不在本体正中）。把 mesh 中心放到 (−10.10, 0, 6.57) 后，输出轴恰好落在
+#   coxa 帧的 z 轴（x=0, y=0）上——舵机轴与关节轴重合，这是物理上必须成立的。
+#
+#   （旧值 (0, -3.17, 21.90) 是把图纸全局坐标直接当 coxa 帧坐标用——
+#     差了一个旧原点 (0, -14.77, 12.15)，y 偏 14.77、z 偏 9.75。
+#     当时的"验证"只核对了常量自洽，没对独立基准，没发现。）
+SERVO_CENTER_IN_COXA_MM = (-10.10, 0.00, 6.57)
+
+# mg996r.stl 自己的包围盒中心（mm）——它的原点不在中心，所以 visual 的 origin 要减掉它。
+#
+# 实测 bbox：x -27.10~27.10、y -13.17~6.83、z -1.41~45.09（54.20×20.00×46.50）
+# → 中心 (0, -3.17, 21.84)。
+#
+# ⚠ 与上面 SERVO_CENTER_IN_COXA_MM 的 (0, -3.17, 21.90) **几乎完全相同**（z 差 0.06mm）。
+#   也就是说这个 mesh 和图纸里那台舵机是同轴向、同基准的，**只需要 scale 不需要旋转**，
+#   归心偏移也只有 0.06mm。
+#
+#   之前这里填的是 (0, -5.60, 21.90)（把 y 的包围盒范围记错了一档），
+#   结果舵机整体偏移 2.4mm —— 单看 RViz 看不出来，是按"渲染出来的包围盒中心
+#   应当等于图纸实测中心"去核对才发现的。
+SERVO_MESH_CENTER_MM = (0.0, -3.17, 21.84)
+
+# ⚠ **只有髋部这 6 个舵机在这里单独放**，另外 12 个（每条腿的股、膝）
+#   已经**烘进 femur.stl 里**了，不要再加一遍——加了会在同一位置画两台。
+#
+#   为什么髋部要单独放：髋舵机的本体固定在**机身**上（它的输出轴就是 coxa 的
+#   旋转轴），烘进 coxa.stl 会跟着腿一起摆——MG996R 的轴偏离本体中心 10.1mm，
+#   腿一转就看得出来。所以 export_cad_meshes.py 把 `Arm` 里的舵机容器排除了
+#   （见 EXCLUDE_SUBTREES）。
+#
+#   股 / 膝那两台的中心正好落在各自的关节轴上，挂哪一节几乎看不出来，
+#   就没必要拆开——留在 femur.stl 里位置是图纸实测的，更可靠。
+#
+#   （曾经以为"图纸里只有 1 台舵机"，那是 Clone 变换 bug 造成的误判：
+#     股杆上的 MG996R013/014 是 Draft 克隆，.Shape 已含自己的 Placement，
+#     再乘 getGlobalPlacement() 会重复应用一次，两台就重叠成一台、被去重删掉。）
+
 # 关节限位里的 effort / velocity。URDF 对 revolute 关节要求这两个字段。
 # 数值取自 MG996R 厂商标称（11 kg·cm ≈ 1.08 N·m；0.17 s/60° ≈ 6.2 rad/s），
 # **未经实测**。它们不影响显示，只影响以后接动力学仿真时的可信度。
@@ -73,6 +128,7 @@ COLOR_BODY = "0.55 0.55 0.58 1"
 COLOR_COXA = "0.85 0.35 0.30 1"
 COLOR_FEMUR = "0.35 0.75 0.40 1"
 COLOR_TIBIA = "0.35 0.55 0.90 1"
+COLOR_SERVO = "0.20 0.20 0.22 1"
 
 # 六条腿：(短名, 左右符号, 配置里的腿座键)
 # 顺序与 leg_calc 的 kAllLegIds 一致：lf lm lr rf rm rr
@@ -185,6 +241,7 @@ MATERIALS = {
     "coxa": COLOR_COXA,
     "femur": COLOR_FEMUR,
     "tibia": COLOR_TIBIA,
+    "servo": COLOR_SERVO,
 }
 
 
@@ -242,6 +299,51 @@ def link_xml(name, mesh_key, material_name):
     )
 
 
+def servo_link_xml(leg_short, joint_key, parent_link, position_mm, yaw=0.0):
+    """一台舵机：fixed joint + mg996r.stl。
+
+    ⚠ 与连杆 mesh 的三点不同，少写一处 RViz 里就画错，而且不报错：
+      1. 单位是毫米 → 必须写 scale="0.001"
+      2. 原点不在 mesh 中心 → **visual / collision 的** origin 减掉 SERVO_MESH_CENTER_MM
+      3. 用 fixed joint 挂在**父连杆**上（舵机固定在上一节，不随本关节转）
+
+    position_mm：舵机装配体包围盒中心在**父连杆帧**里的位置（mm）。
+    yaw        ：腿座绕竖直轴的朝向（中腿 90°、角腿 45°/135°）。
+
+    ⚠ **偏移要写在 visual 的 origin 里，不能写在 joint 的 origin 里。**
+    joint 的 origin 同时决定子坐标系的位置和朝向，把"让 mesh 归心"的偏移塞进去，
+    它就会跟着 yaw 再转一次——中腿的舵机会被甩到错的地方。
+    分开写就各自独立：joint 只管"舵机装在哪、朝哪"，visual 只管"mesh 怎么归心"。
+    """
+    position = " ".join(fmt(v * 0.001) for v in position_mm)
+    offset = " ".join(fmt(-v * 0.001) for v in SERVO_MESH_CENTER_MM)
+    geometry = (
+        f'      <geometry>\n'
+        f'        <mesh filename="package://spider/model/{SERVO_MESH}"'
+        f' scale="{SERVO_SCALE} {SERVO_SCALE} {SERVO_SCALE}"/>\n'
+        f'      </geometry>\n'
+    )
+    link = f"{leg_short}_{joint_key}_servo_link"
+    return (
+        f'  <link name="{link}">\n'
+        f'    <visual>\n'
+        f'      <origin xyz="{offset}" rpy="0 0 0"/>\n'
+        f'{geometry}'
+        f'{visual_material("servo")}'
+        f'    </visual>\n'
+        f'    <collision>\n'
+        f'      <origin xyz="{offset}" rpy="0 0 0"/>\n'
+        f'{geometry}'
+        f'    </collision>\n'
+        f'  </link>\n'
+        f'  <joint name="{leg_short}_{joint_key}_servo_joint" type="fixed">\n'
+        f'    <parent link="{parent_link}"/>\n'
+        f'    <child link="{link}"/>\n'
+        f'    <origin xyz="{position}" rpy="0 0 {fmt(yaw)}"/>\n'
+        f'  </joint>\n'
+    )
+
+
 def body_xml(params):
     """机身：图纸机身的 5 个结构件（底板 / 支柱 / 电池架 / PCB 托板 / 上盖）。
 
@@ -295,6 +397,22 @@ def leg_xml(params, leg_short, side, spec_key):
         )
     )
     out.append(link_xml(f"{leg_short}_coxa_link", "coxa", "coxa"))
+
+    # 髋部舵机：它**固定在机身上**、输出轴驱动 coxa，所以挂在 spider_base 下
+    # （挂 coxa_link 的话舵机会跟着腿一起转，物理上恰恰相反）。
+    # 位置 = 腿座位置 + 按 yaw 旋转后的实测偏移。
+    cx, cy, cz = SERVO_CENTER_IN_COXA_MM
+    rotated_x = cx * math.cos(yaw) - cy * math.sin(yaw)
+    rotated_y = cx * math.sin(yaw) + cy * math.cos(yaw)
+    out.append(
+        servo_link_xml(
+            leg_short,
+            "coxa",
+            "spider_base",
+            (x * 1000.0 + rotated_x, y * 1000.0 + rotated_y, cz),
+            yaw,
+        )
+    )
 
     # 关节 2：femur 俯仰，位于 coxa 杆末端，绕局部 y。
     out.append(

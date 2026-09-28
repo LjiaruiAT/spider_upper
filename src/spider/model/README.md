@@ -64,7 +64,7 @@
 
 | 文件 | 说明 | 状态 |
 |---|---|---|
-| **`body.stl`** | **机身**（上下两层共 5 个结构件），已在 URDF 机身帧、单位米 | ✅ URDF 在用 |
+| **`body.stl`** | **机身**（上下两层共 6 个结构件），已在 URDF 机身帧、单位米 | ✅ URDF 在用 |
 | **`coxa.stl`** | **髋连杆**，原点在髋关节、单位米 | ✅ URDF 在用 |
 | **`femur.stl`** | **股连杆**，原点在股关节、单位米 | ✅ URDF 在用 |
 | **`tibia.stl`** | **胫连杆**，原点在膝关节、单位米 | ✅ URDF 在用 |
@@ -88,12 +88,34 @@
 RViz 里就会表现为"mesh 飘在关节外面"，**且不报错**。
 
 ```
-body.stl    机身 5 层：底板 Body + 支柱 Body002 + 电池架 Body001
-                      + PCB 托板 Body003 + 上盖 Body005
-coxa.stl    髋：Arm + HorizontalConnector + MotorConnector + ArmCap + BaseHolder
-femur.stl   股：MiddleArm
+body.stl    机身 6 层：底板 Body + 支柱 Body002 + 电池架 Body001
+                      + PCB 托板 Body003 + 上盖 Body005 + Body004
+coxa.stl    髋：Arm（**不含舵机**）+ HorizontalConnector + MotorConnector
+                + ArmCap + BaseHolder
+femur.stl   股：MiddleArm（**含 2 台舵机**：髋位 MG996R013 + 膝位 MG996R014）
 tibia.stl   胫：ArmTip
+mg996r.stl  单台舵机，被 6 个髋舵机 link 复用
 ```
+
+### 18 台舵机的分布
+
+| 舵机 | 固定在哪一节 | 在哪 |
+|---|---|---|
+| 髋 ×6 | **机身** | 独立 link（`{leg}_coxa_servo_link` + `mg996r.stl`） |
+| 股 ×6 | 髋 | 烘在 `femur.stl` 里（中心正好在股关节轴上，挂哪节几乎看不出） |
+| 膝 ×6 | 股 | 烘在 `femur.stl` 里（同上） |
+
+**髋舵机为什么要单独放**：它的本体螺栓在机壳上、输出轴就是 coxa 的旋转轴，
+所以整台舵机**不跟着腿转**。烘进 `coxa.stl` 的话它会跟着摆——它离轴 11.6mm，
+中腿转 90° 时肉眼可见。所以 `export_cad_meshes.py` 把 `Arm` 里的舵机容器排除了
+（见 `EXCLUDE_SUBTREES`）。
+
+> ⚠ **曾经误判"图纸里只有 1 台舵机"**：`MiddleArm` 的 `MG996R013/014` 是
+> **Draft 克隆**（`TypeId` 是笼统的 `Part::FeaturePython`，Proxy 才是
+> `draftobjects.clone.Clone`），它的 `.Shape` **已经包含自己的 Placement**。
+> 再乘 `getGlobalPlacement()` 会重复应用一次 → 两台重叠成一台 → 被去重删掉。
+> 结果就是"膝盖舵机消失"，而且**不报任何错**。
+> 判据：克隆有 `Objects` 属性（被克隆的源对象列表），`Slice`（CompoundFilter）没有。
 
 > ⚠ **机身必须整体从同一份图纸导出**，不能挑几个 STL 拼：
 > `pcb_chasis_holder.stl` 与图纸里的 `Body003` 的 **z 中心差 15mm**，
@@ -115,14 +137,18 @@ conda create -y -n freecad -c conda-forge freecad   # apt 里是 0.19，打不�
 
 | 事实 | 说明 |
 |---|---|
-| 图纸里**没有"装好的腿"** | `Arm` / `MiddleArm` / `ArmTip` 是三个各自独立建模、朝向互不相干的子装配 |
-| `ArmTip` 原点 = 膝关节 | 它的全局 x = **149.80 = 60.3 + 89.5**；抓住这个锚点就不用反推关节位置 |
-| 三个关节共线 | 图纸把腿伸直摆着 → 关节在 (0 / 60.3 / 149.80, **-14.77**, **12.15**) |
+| 图纸**是装好的腿** | 全局坐标下 `coxa`/`femur`/`tibia` 三段在关节处自然衔接，是一整条腿 |
+| **关节轴 = 舵机输出轴** | 不是容器原点。用 FreeCAD 量舵机输出轴（沿轴线的最大圆柱，R10）得真实旋转轴：髋 (10.10, -3.17, ·)、股 (70.40, ·, 15.33)、膝 (159.90, ·, 15.33)。两个**精确到 0.01mm** 的吻合可互证：`70.40−10.10=60.30=COXA_LENGTH`、`159.90−70.40=89.50=FEMUR_LENGTH` |
+| ⚠ 容器原点 ≠ 关节 | `ArmTip` 容器原点 (149.80, -14.77, 12.15) 只是建模参考点。用它当膝关节会让 mesh 绕错误的点转——RViz 里胫杆与舵机"连不紧"，一转就脱开且**不报错** |
 | `HorizontalConnector` 与 `Arm` **平级** | 不是 `Arm` 的子对象，只导 `Arm` 会漏件 |
-| `App::Clone` / `Slice` 是**派生体** | `ArmHolderBase` 与 `Slice005` 与 `TopHolder+BottomHolder` 完全重合，必须按体积+包围盒去重 |
+| **Draft 克隆的 `.Shape` 已含自己的 Placement** | 见上面 18 台舵机那节——再乘 `getGlobalPlacement()` 会让膝盖舵机消失 |
+| `Slice` 是**派生体** | `ArmHolderBase` / `Slice005` / `TopHolder+BottomHolder` 三者几何重合，必须去重 |
+| 去重不能只看包围盒 | `ConnectorVertical` 是 C 形支架，包围盒套住了旁边的舵机但材料没套住——一整台舵机被误删过。要用布尔求交确认 |
 | `App::Part` 带 `Extensions="True"` | 正则匹配 `<Object name="X">` 会漏掉它们——而装配容器恰好都带这个属性 |
 | 机身朝向要**量**出来 | 机壳沿 ±x 的极值点跨度只有 23.3mm（窄凸耳，朝中腿），沿 ±z 有 105.1mm（长边） |
-| 机壳高度 | 髋座（`coxa_mount`）底面在髋关节轴下方 **21.56mm**，机壳顶面贴在那里 |
+| 机壳高度 | 髋座（`coxa_mount`）底面在**髋轴高度**（图纸 z=15.33）下方 **24.74mm**，机壳顶面贴在那里 |
+| 髋舵机**不能烘进 `coxa.stl`** | 它固定在机身上、输出轴就是 coxa 的旋转轴；MG996R 的轴偏离本体中心 10.1mm，跟着转会看得出来 |
+| `<origin>` 写在 visual 还是 joint 上**不一样** | 写进 joint 的话偏移会跟着 yaw 再转一次，中腿的舵机被甩到错的地方 |
 
 **重新生成**（改机械件后）：
 
@@ -133,8 +159,9 @@ cd src/spider
 ```
 
 脚本是 `scripts/export_cad_meshes.py`，里面有全部坐标依据的注释。
-核心逻辑是：**对每个连杆取"相对所在容器原点"的 Placement，再整体减去该连杆的
-关节全局坐标，最后 ×0.001 换算成米**。背景见 `工程现状总结.md` 的 5.17 节。
+核心逻辑是：**对每个连杆取"相对所在容器原点"的 Placement（几何形状），再整体减去
+该连杆的关节（= 舵机输出轴）全局坐标，最后 ×0.001 换算成米**。背景见
+`工程现状总结.md` 的 5.17 节。
 
 
 
