@@ -23,7 +23,7 @@
     ros2 topic pub -r 20 /spider/cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.2}}'
 
 想看转弯（半径 = v / w，能明显看出走的是圆弧）：
-ros2 topic pub -r 20 /spider/cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.2}, angular: {z: 0.3}}'
+
 
 
 ⚠ odom 是**按命令速度推算**的，不是传感器测出来的（见 leg_calc 的

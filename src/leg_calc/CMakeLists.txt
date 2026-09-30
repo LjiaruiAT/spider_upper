@@ -24,6 +24,7 @@ find_package(tf2_ros REQUIRED)
 add_library(leg_calc_core STATIC
   src/command_watchdog.cpp
   src/foot_trajectory.cpp
+  src/gait_config_loader.cpp
   src/gait_phase_manager.cpp
   src/leg_chain.cpp
   src/leg_kinematics.cpp
@@ -96,6 +97,7 @@ if(BUILD_TESTING)
     test_command_watchdog
     test_common_types
     test_foot_trajectory
+    test_gait_config_loader
     test_gait_phase_manager
     test_gait_types
     test_leg_chain

@@ -52,6 +52,10 @@ inline GaitPattern parse_gait_pattern(const std::string& name) {
 
 // 步态配置参数。速度命令不直接存放在这里；这些字段决定轨迹的尺度、周期和上限。
 //
+// **运行值来自 spider/config/gait_params.yaml**（load_gait_config_from_yaml）；
+// 这里的默认值只作为兜底和单元测试的基准，节点启动时会被 YAML 覆盖。
+// 唯一的例外是 pattern：它是 ROS 参数 `gait_pattern`，不在 YAML 里。
+//
 // 注意：step_length_m / lateral_step_m / turn_step_rad 是**上限**，不是实际值。
 // 实际步长由"速度命令 × 支撑相时长"决定（见 FootTrajectory::compute_step_command），
 // 只有在命令速度超出机械能力时，才被这几个上限夹住。
@@ -61,7 +65,7 @@ inline GaitPattern parse_gait_pattern(const std::string& name) {
 // 否则就会出现"命令 0.2 m/s、实际只走 0.08 m/s"这种命令与现实脱节的情况。
 //
 // 关于"身体站立高度"：它**不在**这里。站姿由 spider/config/leg_params.yaml 提供
-// （`body_height_mm`），因为那是机器人的几何属性，不是步态参数。
+// （`home_local_mm`），因为那是机器人的几何属性，不是步态参数。
 struct GaitConfig {
     GaitPattern pattern{GaitPattern::Tripod};
 

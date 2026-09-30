@@ -20,6 +20,7 @@
 #include "leg_calc/command_watchdog.hpp"
 #include "leg_calc/common_types.hpp"
 #include "leg_calc/foot_trajectory.hpp"
+#include "leg_calc/gait_config_loader.hpp"
 #include "leg_calc/gait_phase_manager.hpp"
 #include "leg_calc/leg_chain.hpp"
 #include "leg_calc/leg_kinematics.hpp"
@@ -201,11 +202,9 @@ public:
         // 会突变（Tripod 是"半个周期一换组"，Wave 是"1/6 周期窗口"），
         // 足端目标会在一个控制周期内跳到别处。要做运行中切换得先设计过渡机制。
         //
-        // 配置写错时直接抛异常让启动失败，不静默退回 Tripod——
-        // 那会让人以为在跑 Wave，实际在跑 Tripod，而日志和波形都看不出区别。
+        // 这里只声明参数；解析放在读取 gait_params.yaml 之后——
+        // 数值来自 YAML、模式由本参数覆盖，顺序反了命令行切步态会失效（见下文）。
         declare_parameter<std::string>("gait_pattern", "tripod");
-        gait_config_.pattern =
-            leg_calc::parse_gait_pattern(this->get_parameter("gait_pattern").as_string());
 
         // 命令看门狗的超时。默认 0.25s 与 spider_task 的 cmd_vel_timeout_sec 一致，
         // 而 spider_task 的发布周期是 20ms——0.25s 相当于容忍连丢 12 拍，
@@ -248,6 +247,17 @@ public:
         const auto spider_share = ament_index_cpp::get_package_share_directory("spider");
         servo_map_path_ = spider_share + "/config/servo_map.yaml";
         leg_params_path_ = spider_share + "/config/leg_params.yaml";
+        gait_params_path_ = spider_share + "/config/gait_params.yaml";
+
+        // 步态参数：数值从 YAML 读（改参数不用重编译），步态模式由 ROS 参数覆盖。
+        //
+        // 顺序很重要：**先 YAML、后覆盖 pattern**。反过来的话，命令行传的
+        // `gait_pattern:=wave` 会被加载器返回的默认值（tripod）冲掉。
+        // 两个来源的配置错误都会抛异常让启动失败，不静默退回默认值——
+        // 那会让人以为在跑 Wave、实际在跑 Tripod，而日志和波形都看不出区别。
+        gait_config_ = leg_calc::load_gait_config_from_yaml(gait_params_path_);
+        gait_config_.pattern =
+            leg_calc::parse_gait_pattern(this->get_parameter("gait_pattern").as_string());
 
         // 腿长来自配置，链在这里按实际尺寸构造——代码里不再有写死的杆长。
         layout_config_ = leg_calc::load_leg_layout_from_yaml(leg_params_path_);
@@ -271,6 +281,10 @@ public:
 
         foot_trajectory_.update_config(gait_config_);
         gait_phase_manager_.update_config(gait_config_);
+        // velocity_smoother_ 也持有 GaitConfig 的一份副本（加速度上限），必须一起更新——
+        // 否则 YAML 改了加速度，平滑器还在用构造时（默认值）的那份，
+        // 表现为"配置改了但对平滑不起作用"，而且不报任何错。
+        velocity_smoother_.update_config(gait_config_);
 
         // 把"参数是否自洽"显式打出来：步长上限 + 步态频率 + 支撑相占比三者一确定，
         // 能支持的最大速度也就确定了。命令超过它时机器人**不会更快**，
@@ -293,6 +307,7 @@ public:
 
         RCLCPP_INFO(this->get_logger(), "Loaded leg layout from %s", leg_params_path_.c_str());
         RCLCPP_INFO(this->get_logger(), "Loaded servo_map from %s", servo_map_path_.c_str());
+        RCLCPP_INFO(this->get_logger(), "Loaded gait params from %s", gait_params_path_.c_str());
         // 把腿几何和限位显式打出来——这是"配置到底有没有被真正用上"的唯一证据。
         // （以前这里打印可达半径，现在预检查关掉了，改为打印杆长与归位姿态：
         //   只要这几个数字不是图纸值，就说明配置没被读进去。）
@@ -822,6 +837,7 @@ private:
     std::vector<leg_calc::ServoMapEntry> servo_map_{};
     std::string servo_map_path_;
     std::string leg_params_path_;
+    std::string gait_params_path_;
     rclcpp::Publisher<robot_interfaces::msg::Servo18>::SharedPtr servo_target_publisher_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_publisher_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr task_cmd_vel_subscription_;

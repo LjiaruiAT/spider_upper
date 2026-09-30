@@ -1,0 +1,37 @@
+# 步态参数（GaitConfig 的 YAML 版本）。
+#
+# 这些参数决定"机器人能怎么动"：步态周期、步长上限、抬腿高度、速度平滑的加速度上限。
+# 单位用米 / 秒 / 赫兹（不是 mm / deg）——字段名里的 _m / _hz 后缀就说明单位，
+# 不做换算（不像 leg_params.yaml 需要从图纸的 mm 换算）。
+#
+# ⚠ 参数是**相互耦合**的：
+#     支撑相时长 = stance_duty(pattern) / frequency_hz
+#     最大速度   = step_length_m / 支撑相时长
+#   步长上限 + 步态频率 + 支撑相占比三者一确定，能支持的最大速度也就确定了。
+#   改一个必须回头看另外两个，否则会出现"命令 0.2 m/s、实际只走 0.08 m/s"。
+#   leg_calc 启动时会打印当前能力上限（max_speed 等），核对那几个数即可。
+#
+# 步态模式（tripod / ripple / wave）**不在这里**：它是 ROS 参数 `gait_pattern`，
+# 由 launch 或命令行选择；本文件里的数值是三种步态共用的上限。
+#
+# 字段说明：
+#   frequency_hz            步态周期频率。提高它 → 最大速度提高，但摆动窗口变短，
+#                           对舵机角速度要求更高。
+#   step_length_m           前进方向的步长上限。实际步长 = 速度 × 支撑相时长，被它夹住。
+#   step_height_m           摆动相抬腿最大高度。
+#   lateral_step_m          左右横移的步长上限。
+#   turn_step_rad           单次支撑相的转角上限。
+#   max_linear_accel_mps2   速度平滑的线加速度上限。0 = 关闭平滑（对照实验开关）。
+#   max_angular_accel_rps2  速度平滑的角加速度上限。0 = 关闭平滑。
+#
+# ⚠ 当前这组值是**为覆盖 0.2 m/s 测试命令反推的**，不是实测能力：
+#     2.5 Hz + 支撑相 0.2s + 步长 40mm → 最大速度 0.2 m/s。
+#   舵机到位后要按实测的摆动相角速度重新定这组值。
+gait_params:
+  frequency_hz: 1.0
+  step_length_m: 0.04
+  step_height_m: 0.03
+  lateral_step_m: 0.02
+  turn_step_rad: 0.15
+  max_linear_accel_mps2: 0.4
+  max_angular_accel_rps2: 1.0
