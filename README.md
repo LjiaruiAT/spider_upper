@@ -7,8 +7,6 @@
 >
 > 腿长、腿座位置、关节限位都来自机械图纸（`~/Desktop/exist_urdf/hardware`），不是演示数据。
 > 但**舵机还没买**：所有标定值都是 0，真发送也没接（`fake_send` 模式）。
->
-> 详细状态、已知问题、下一步计划见 **`工程现状总结.md`**。
 
 ---
 
@@ -117,7 +115,7 @@ driver 晚启动或重启也能收到。**不要和 `leg_calc` 同时运行**—
 ./build/leg_calc/test_leg_chain
 ./build/leg_calc/test_leg_layout
 ./build/leg_calc/test_servo18_mapper
-# ... 共 11 个文件，全部列在 工程现状总结.md 第 8 节
+# ... 共 12 个测试文件
 
 # 官方口径
 colcon test --packages-select leg_calc
