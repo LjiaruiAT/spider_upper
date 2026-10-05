@@ -11,6 +11,7 @@ find_package(robot_interfaces REQUIRED)
 
 add_executable(robot_driver_node
   src/main.cpp
+  src/serial_port.cpp
 )
 
 ament_target_dependencies(robot_driver_node

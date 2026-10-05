@@ -24,3 +24,10 @@ log/
 /第二次改造记录.md
 /蜘蛛机器人上位机工程骨架设计.md
 /舵机序号与装配.md
+/调试方法.md
+
+# Python 缓存
+__pycache__/
+
+# IDE
+.codebuddy/

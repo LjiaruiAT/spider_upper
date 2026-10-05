@@ -69,10 +69,23 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# 核心库也要安装并导出：spider_task 的 leg_ik_node 复用它做单腿 IK。
+# 只导出库与头文件，不导出 ROS 依赖（使用方自己 find_package rclcpp 等）。
+install(TARGETS leg_calc_core
+  EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
 install(DIRECTORY
   include/
   DESTINATION include
 )
+
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+ament_export_include_directories(include)
+ament_export_dependencies(orocos_kdl)
 
 if(BUILD_TESTING)
   # 暂时不启用 ament_lint_auto（copyright / cpplint / uncrustify）。

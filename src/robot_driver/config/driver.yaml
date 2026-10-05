@@ -8,13 +8,18 @@
 #     启动时可以只覆盖单个值：
 #       ros2 run robot_driver robot_driver_node --ros-args -p device_name:=/dev/ttyUSB0
 #
-# 当前状态：真实串口尚未接入。
-#   · fake_send 必须保持 true（false 会启动失败——真实发送还没实现，
-#     静默降级会让人以为正在真发送）；
-#   · readback_enabled 必须保持 false（同上，回读未实现）。
+# 状态（2026-10-05）：**真发送已实现**。
+#   · fake_send=true  → 只打印协议帧，不碰设备（默认，安全）
+#   · fake_send=false → 真发串口；**打不开设备会启动失败**（明确报错，不静默降级）；
+#                       运行中断线会自动尝试重连（1 秒节流）
+#   · readback_enabled 仍必须为 false（回读未实现）
+#
+# 设备名建议用 udev 固定名（见 调试方法.md §7）：
+#   /etc/udev/rules.d/99-stm32-cdc.rules → SYMLINK+="spider_stm32"
+# 没有 udev 规则时按实际设备名填（如 /dev/ttyACM1；注意 J-Link 常占 ttyACM0）。
 robot_driver_node:
   ros__parameters:
-    device_name: /dev/ttyACM0
+    device_name: /dev/spider_stm32
     baud_rate: 115200
     fake_send: true
     readback_enabled: false

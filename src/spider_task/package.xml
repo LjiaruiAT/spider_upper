@@ -10,7 +10,10 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>ament_index_cpp</depend>
+  <depend>eigen</depend>
   <depend>geometry_msgs</depend>
+  <!-- 单腿 IK 节点复用 leg_calc 的运动学核心库（leg_calc_core） -->
+  <depend>leg_calc</depend>
   <depend>rclcpp</depend>
   <depend>robot_interfaces</depend>
 

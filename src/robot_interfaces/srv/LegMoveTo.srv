@@ -1,0 +1,16 @@
+# 单腿足端目标点 —— 腿局部坐标系，单位 mm。
+#
+# 腿局部坐标系约定（与 leg_params.yaml 一致）：
+#   原点在髋关节轴线上；x 沿 coxa 指向这条腿的**外侧**；z 向上（地面在 z 负方向）。
+# 六条腿共用这一套坐标 —— 同一个 (x, y, z) 对任何一条腿都成立。
+#
+# 站姿参考点（leg_params.yaml 的 home_local_mm）：x=121.8, y=0.0, z=-91.4
+# 例：想让 lf 腿蹲低一点 -> x=121.8, y=0.0, z=-120.0
+
+string leg      # 腿 id：lf / lm / lr / rf / rm / rr
+float64 x       # mm
+float64 y       # mm
+float64 z       # mm
+---
+bool success    # 解算并下发成功
+string message  # 成功：解出的 [coxa, femur, tibia] 角度；失败：原因（不可达 / 超限位 / 腿名非法）

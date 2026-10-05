@@ -42,10 +42,31 @@ ament_target_dependencies(manual_servo_node
   robot_interfaces
 )
 
+# 单腿 IK 控制节点：输入腿局部坐标 (x,y,z)，解算后只更新该腿的 3 路。
+# 复用 leg_calc 的运动学核心库（leg_calc_core，由 leg_calc 导出）。
+find_package(leg_calc REQUIRED)
+find_package(Eigen3 REQUIRED)
+
+add_executable(leg_ik_node
+  src/leg_ik.cpp
+)
+
+target_link_libraries(leg_ik_node
+  leg_calc::leg_calc_core
+  Eigen3::Eigen
+)
+
+ament_target_dependencies(leg_ik_node
+  ament_index_cpp
+  rclcpp
+  robot_interfaces
+)
+
 install(TARGETS
   spider_task_node
   servo_listener_node
   manual_servo_node
+  leg_ik_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

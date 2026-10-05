@@ -12,6 +12,7 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Servo18.msg"
   "srv/SetServoAngles.srv"
+  "srv/LegMoveTo.srv"
   DEPENDENCIES std_msgs
 )
 

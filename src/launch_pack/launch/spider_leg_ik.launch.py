@@ -1,3 +1,29 @@
+"""单腿 IK 控制：输入腿局部坐标 (x,y,z)，让指定腿的足端走到那个点。
+
+启动内容：
+    leg_ik_node       读 leg_params.yaml（腿长 / 腿座 / 限位），IK 解算后
+                      只更新目标腿的 3 路；20ms 定时器按 1 秒平滑插值发布
+    robot_driver_node 打包 42 字节协议帧；fake_send:=false 时真发串口
+
+**不启动 leg_calc**：两者都往 /spider/servo_target 发布，同时跑会互相覆盖。
+
+用法：
+    # ① 打印模式（不碰设备）
+    ros2 launch launch_pack spider_leg_ik.launch.py
+
+    # ② 真发送（接下位机 + 舵机）
+    ros2 launch launch_pack spider_leg_ik.launch.py \\
+        fake_send:=false device_name:=/dev/ttyACM1
+
+    # 让 lf 腿的足端走到腿局部系的 (121.8, 0, -120)，即比站姿蹲低 28.6mm
+    ros2 service call /spider/leg_ik/move_to robot_interfaces/srv/LegMoveTo \\
+        "{leg: 'lf', x: 121.8, y: 0.0, z: -120.0}"
+
+    # 回站姿
+    ros2 service call /spider/leg_ik/move_to robot_interfaces/srv/LegMoveTo \\
+        "{leg: 'lf', x: 121.8, y: 0.0, z: -91.4}"
+"""
+
 import os
 
 from ament_index_python.packages import get_package_share_directory
@@ -9,21 +35,10 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    # robot_driver 的运行参数（设备名 / 波特率 / fake_send / readback_enabled）
-    # 从 config/driver.yaml 加载——那是 ROS 参数文件格式（顶层是节点名）。
-    # 用参数文件而不是让节点自己解析：命令行可以只覆盖单个值，例如
-    #   ros2 run robot_driver robot_driver_node --ros-args -p device_name:=/dev/ttyUSB0
     driver_params = os.path.join(
         get_package_share_directory('robot_driver'), 'config', 'driver.yaml')
 
     return LaunchDescription([
-        # 步态选择：tripod / ripple / wave（默认 tripod）。
-        DeclareLaunchArgument(
-            'gait_pattern',
-            default_value='tripod',
-            description='步态模式：tripod / ripple / wave；透传给 leg_calc_node',
-        ),
-        # 真发送开关与设备名（覆盖 driver.yaml 里的同名参数）
         DeclareLaunchArgument(
             'fake_send',
             default_value='true',
@@ -36,16 +51,9 @@ def generate_launch_description():
         ),
         Node(
             package='spider_task',
-            executable='spider_task_node',
-            name='spider_task_node',
+            executable='leg_ik_node',
+            name='leg_ik_node',
             output='screen',
-        ),
-        Node(
-            package='leg_calc',
-            executable='leg_calc_node',
-            name='leg_calc_node',
-            output='screen',
-            parameters=[{'gait_pattern': LaunchConfiguration('gait_pattern')}],
         ),
         Node(
             package='robot_driver',
