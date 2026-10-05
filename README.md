@@ -6,7 +6,8 @@
 > 并且**可以在 RViz 里看见机器人在走**。
 >
 > 腿长、腿座位置、关节限位都来自机械图纸（`~/Desktop/exist_urdf/hardware`），不是演示数据。
-> 但**舵机还没买**：所有标定值都是 0，真发送也没接（`fake_send` 模式）。
+> 但**舵机还没买**：所有标定值都是 0；真发送已实现（`serial_port` 层 + 断线自动重连），
+> 启动时加 `fake_send:=false` 打开，**默认 `fake_send:=true`**（只打印帧，不碰设备）。
 
 ---
 
@@ -94,7 +95,12 @@ ros2 launch launch_pack spider_minimal.launch.py
 ```
 
 和上面的区别：**多启动 `robot_driver_node`**，会把 18 路角度打包成 42 字节协议帧。
-目前是 `fake-send`（只打印十六进制，不真的发串口），所以不会驱动任何硬件。
+默认 `fake_send:=true`（只打印十六进制，不碰设备）；接上硬件后加 `fake_send:=false` 即真发串口
+（**设备打不开会直接启动失败**，不静默降级）：
+
+```bash
+ros2 launch launch_pack spider_minimal.launch.py fake_send:=false device_name:=/dev/ttyACM1
+```
 
 **显示模式刻意不带驱动节点**——看姿态的时候不需要产生真数据。
 
@@ -134,8 +140,9 @@ colcon test-result --all
 |---|---|---|
 | `ros2 launch launch_pack spider_walk.launch.py` | robot_state_publisher + spider_task + leg_calc + rviz2（`odom` 视角） | **看机器人在地面上走** |
 | `ros2 launch launch_pack spider_display.launch.py` | 同上（`spider_base` 视角） | 看每条腿怎么动 |
-| `ros2 launch launch_pack spider_minimal.launch.py` | spider_task + leg_calc + robot_driver | 真实链路（协议帧打印，当前 fake-send） |
+| `ros2 launch launch_pack spider_minimal.launch.py` | spider_task + leg_calc + robot_driver | 真实链路（默认打印帧；`fake_send:=false` 真发） |
 | `ros2 launch launch_pack spider_manual.launch.py` | manual_servo_node + robot_driver | 手动调试（绕过数学链，直接发舵机角） |
+| `ros2 launch launch_pack spider_leg_ik.launch.py` | leg_ik_node + robot_driver | 单腿 IK 调试（服务调用足端坐标） |
 | `ros2 run leg_calc leg_calc_node` | 只有数学层 | 单独调试 / 脚本化验证 |
 
 可用参数：
