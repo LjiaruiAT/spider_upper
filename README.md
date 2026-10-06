@@ -53,7 +53,7 @@ ros2 launch launch_pack spider_walk.launch.py
 ros2 launch launch_pack spider_display.launch.py
 
 # 选步态（默认 tripod；ripple / wave 更稳但速度上限更低，见下方说明）
-ros2 launch launch_pack spider_walk.launch.py gait_pattern:=ripple
+ros2 launch launch_pack spider_walk.launch.py
 ```
 
 RViz 打开后应该看到一台六足机器人站在网格上：
@@ -99,8 +99,12 @@ ros2 launch launch_pack spider_minimal.launch.py
 （**设备打不开会直接启动失败**，不静默降级）：
 
 ```bash
-ros2 launch launch_pack spider_minimal.launch.py fake_send:=false device_name:=/dev/ttyACM1
+ros2 launch launch_pack spider_minimal.launch.py fake_send:=false
 ```
+
+设备名默认是固定名 `/dev/spider_stm32`（需安装 udev 规则，见 `调试方法.md` §2.1）。
+没装规则时按实际设备名传 `device_name:=/dev/ttyACM0` —— **别写死编号**：
+J-Link 插着时它占 `ttyACM0`，下位机就会被挤到 `ttyACM1`，拔掉又变回来。
 
 **显示模式刻意不带驱动节点**——看姿态的时候不需要产生真数据。
 

@@ -12,10 +12,13 @@
     ros2 launch launch_pack spider_leg_ik.launch.py
 
     # ② 真发送（接下位机 + 舵机）
+    #    设备默认用固定名 /dev/spider_stm32（需 udev 规则，见 调试方法.md §2.1），故不用传 device_name；
+    #    没装规则时改用实际设备名，如 device_name:=/dev/ttyACM0（别写死编号，J-Link 占位会变）
     ros2 launch launch_pack spider_leg_ik.launch.py \\
-        fake_send:=false device_name:=/dev/ttyACM1
+        fake_send:=false
 
-    # 让 lf 腿的足端走到腿局部系的 (121.8, 0, -120)，即比站姿蹲低 28.6mm
+    # 让 lf 腿的足端走到腿局部系的 (121.8, 0, -120)：
+    # 即这条腿的足端比站姿往下伸 28.6mm（leg_ik 只动这一条腿，机身不会整体下降）
     ros2 service call /spider/leg_ik/move_to robot_interfaces/srv/LegMoveTo \\
         "{leg: 'lf', x: 121.8, y: 0.0, z: -120.0}"
 

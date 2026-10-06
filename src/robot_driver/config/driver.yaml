@@ -14,9 +14,11 @@
 #                       运行中断线会自动尝试重连（1 秒节流）
 #   · readback_enabled 仍必须为 false（回读未实现）
 #
-# 设备名建议用 udev 固定名（见 调试方法.md §7）：
+# 设备名建议用 udev 固定名（见 调试方法.md §2.1）：
 #   /etc/udev/rules.d/99-stm32-cdc.rules → SYMLINK+="spider_stm32"
-# 没有 udev 规则时按实际设备名填（如 /dev/ttyACM1；注意 J-Link 常占 ttyACM0）。
+# 没有 udev 规则时按实际设备名填（如 /dev/ttyACM0）。**不要写死编号**：
+# J-Link 插着时会占 ttyACM0，下位机被挤到 ttyACM1；拔掉 J-Link 又变回 ttyACM0。
+# 用 ls -l /dev/ttyACM* 或 lsusb 查 0483:5740 确认当前是哪个。
 robot_driver_node:
   ros__parameters:
     device_name: /dev/spider_stm32

@@ -15,8 +15,10 @@
     ros2 launch launch_pack spider_manual.launch.py
 
     # ② 真发送（接下位机 + 舵机）—— 设备打不开会启动失败并打印原因
+    #    设备默认用固定名 /dev/spider_stm32（需 udev 规则，见 调试方法.md §2.1），故不用传 device_name；
+    #    没装规则时改用实际设备名，如 device_name:=/dev/ttyACM0（别写死编号，J-Link 占位会变）
     ros2 launch launch_pack spider_manual.launch.py \\
-        fake_send:=false device_name:=/dev/ttyACM1
+        fake_send:=false
 
     # 单路调试（下标 0 = lf coxa = PE9）：转到 120.0°
     ros2 service call /spider/manual_servo/set_angles \\

@@ -9,102 +9,118 @@
 #   servo_ddeg = direction * math_ddeg + offset_ddeg
 # 再夹取到合法区间 [0, 1800]。
 #
+# 注意：这个文件由手写解析器读取，**只支持整行注释，不支持行尾注释**
+#       （servo18_mapper.cpp 用 std::stoi 读整行剩余内容，行尾注释会导致启动失败）。
+#
+# ---------------------------------------------------------------------------
+# 当前 offset 的取法：让**站立姿态映射到舵机 900（中位）**
+# ---------------------------------------------------------------------------
+# 目的：与下位机 kBootPose（全 900）对齐——上电回中位时就是站立姿态，
+#       上位机接管后不需要任何跳变。
+#
+# 站立姿态的数学关节角（IK 对 home_local_mm = [121.8, 0, -91.4] 的解算结果，
+# 六条腿相同）：coxa 0.0° / femur -45.0° / tibia 135.7°
+# 故 offset = 900 - math_ddeg：
+#   coxa  : 900 -    0 =  900
+#   femur : 900 - (-450) = 1350
+#   tibia : 900 -  1357 = -457
+#
+# ⚠ 这只是"让站姿落在中位"的推算值，**不等于标定完成**。
+#   真实值必须在机构装配完成后实测（数学角 0 时量到的舵机读数），
+#   见 调试方法.md §3.5。装配时舵盘齿位若与"900 = 站姿"不一致，需要重装舵盘或修正本表。
+#
 # 职责划分（见 工程现状总结.md 决策 D3）：
 #   - 标定由上位机负责，因此 /spider/servo_target 里发出去的就是"真实舵机角"；
 #   - 下位机 kServoMap 里的同名参数保持 direction=1 / offset=0 作为透传兜底，
 #     只保留硬夹取，不再重复标定。
-#
-# 注意：当前所有标定值都是"不标定"的默认状态，必须实机标定后再填写。
-#   - direction 先全部按 +1 填，哪一路方向反了就改成 -1；
-#   - offset_ddeg 按"数学角为 0 时量到的舵机读数"填。
 servo_map:
   - channel: 0
     leg: lf
     joint: coxa
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: 900
   - channel: 1
     leg: lf
     joint: femur
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: 1350
   - channel: 2
     leg: lf
     joint: tibia
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: -457
   - channel: 3
     leg: lm
     joint: coxa
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: 900
   - channel: 4
     leg: lm
     joint: femur
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: 1350
   - channel: 5
     leg: lm
     joint: tibia
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: -457
   - channel: 6
     leg: lr
     joint: coxa
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: 900
   - channel: 7
     leg: lr
     joint: femur
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: 1350
   - channel: 8
     leg: lr
     joint: tibia
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: -457
   - channel: 9
     leg: rf
     joint: coxa
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: 900
   - channel: 10
     leg: rf
     joint: femur
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: 1350
   - channel: 11
     leg: rf
     joint: tibia
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: -457
   - channel: 12
     leg: rm
     joint: coxa
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: 900
   - channel: 13
     leg: rm
     joint: femur
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: 1350
   - channel: 14
     leg: rm
     joint: tibia
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: -457
   - channel: 15
     leg: rr
     joint: coxa
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: 900
   - channel: 16
     leg: rr
     joint: femur
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: 1350
   - channel: 17
     leg: rr
     joint: tibia
     direction: 1
-    offset_ddeg: 0
+    offset_ddeg: -457

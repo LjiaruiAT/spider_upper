@@ -30,7 +30,7 @@
 gait_params:
   frequency_hz: 1.0
   step_length_m: 0.04
-  step_height_m: 0.03
+  step_height_m: 0.025
   lateral_step_m: 0.02
   turn_step_rad: 0.15
   max_linear_accel_mps2: 0.4
