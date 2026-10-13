@@ -38,17 +38,17 @@ servo_map:
     leg: lf
     joint: coxa
     direction: 1
-    offset_ddeg: 900
+    offset_ddeg: 800
   - channel: 1
     leg: lf
     joint: femur
     direction: 1
-    offset_ddeg: 1350
+    offset_ddeg: 1000
   - channel: 2
     leg: lf
     joint: tibia
     direction: 1
-    offset_ddeg: -457
+    offset_ddeg: -157
   - channel: 3
     leg: lm
     joint: coxa

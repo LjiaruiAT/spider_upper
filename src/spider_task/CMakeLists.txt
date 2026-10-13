@@ -62,11 +62,29 @@ ament_target_dependencies(leg_ik_node
   robot_interfaces
 )
 
+# 键盘遥控节点：终端 WASD/QE/空格 → /spider/cmd_vel（走 spider_task 的任务状态机）。
+# 需要 ament_index_cpp 定位 spider 包的 gait_params.yaml，
+# 并复用 leg_calc_core 里的能力上限换算函数（与 leg_calc 打印的口径一致）。
+add_executable(teleop_keyboard_node
+  src/teleop_keyboard.cpp
+)
+
+target_link_libraries(teleop_keyboard_node
+  leg_calc::leg_calc_core
+)
+
+ament_target_dependencies(teleop_keyboard_node
+  ament_index_cpp
+  geometry_msgs
+  rclcpp
+)
+
 install(TARGETS
   spider_task_node
   servo_listener_node
   manual_servo_node
   leg_ik_node
+  teleop_keyboard_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
