@@ -6,8 +6,11 @@
 > 并且**可以在 RViz 里看见机器人在走**。
 >
 > 腿长、腿座位置、关节限位都来自机械图纸（`~/Desktop/exist_urdf/hardware`），不是演示数据。
-> 但**舵机还没买**：所有标定值都是 0；真发送已实现（`serial_port` 层 + 断线自动重连），
-> 启动时加 `fake_send:=false` 打开，**默认 `fake_send:=true`**（只打印帧，不碰设备）。
+>
+> **实机进度（2026-11）**：单腿（3 路舵机）已跑通 `ROS 2 → 串口 → STM32 → 舵机` 全链路，
+> 舵机实际姿态与逆解输出一致，`fake_send:=false` 可稳定真发。
+> **整机 18 路标定与实机行走尚未完成**——另外 5 条腿未装配，其余通道仍为默认值。
+> 驱动层已实现（`serial_port` + 断线自动重连），默认 `fake_send:=true`（只打印帧，不碰设备）。
 
 ---
 
@@ -102,7 +105,7 @@ ros2 launch launch_pack spider_minimal.launch.py
 ros2 launch launch_pack spider_minimal.launch.py fake_send:=false
 ```
 
-设备名默认是固定名 `/dev/spider_stm32`（需安装 udev 规则，见 `调试方法.md` §2.1）。
+设备名默认是固定名 `/dev/spider_stm32`（需自行安装 udev 规则把设备名固定下来，规则文件尚未入库）。
 没装规则时按实际设备名传 `device_name:=/dev/ttyACM0` —— **别写死编号**：
 J-Link 插着时它占 `ttyACM0`，下位机就会被挤到 `ttyACM1`，拔掉又变回来。
 
@@ -167,17 +170,75 @@ ros2 run leg_calc leg_calc_node --ros-args -p gait_pattern:=wave
 
 ## 结构件（3D 打印）
 
-> **作者发布的 `hardware/stl/` 不完整**：腿只有 8 个件、机身 5 个，**缺 20 多个**——包括每条腿
-> 都要用的**舵盘**和**舵机支架**；并且其中 3 个件与最新图纸尺寸不符（发布后又改过图）。
+仓库里 `src/spider/model/` 只有 7 个 STL：`body` / `coxa` / `femur` / `tibia` 四个结构件，
+加 `mg90s` / `mg996r` / `sg90` 三个舵机参考模型。
 
-**完整零件已从 FreeCAD 图纸导出**（STL + STEP；本机整理，未入 git）：
-
-```text
-~/sw/print/leg|body    # STL：直接给打印服务
-~/sw/cad/leg|body      # STEP：CAD 软件查看 / 编辑
-```
+**这不是完整的打印件集合**：缺少舵盘、舵机支架等装配件，且部分件与最新图纸尺寸不一致。
+完整零件在 FreeCAD 图纸侧维护，未入库。
 
 - 腿 **29 件/条**（整机 ×6）、机身 **6 件**；**建议先打一条腿试装**，验证尺寸与舵机装配后再批量
-- 图纸整理与打印数量细节：本机整理（未入 git）
+- 机械图纸与结构设计由机械方向队友完成，本仓库只保留用于 URDF 的模型
 
 ---
+
+## 项目状态
+
+| 项 | 状态 |
+|---|---|
+| ROS 2 工作区（6 包）与 launch 体系 | ✅ 完成 |
+| 步态生成（tripod / ripple / wave）与速度上限约束 | ✅ 完成 |
+| 六腿 IK（KDL）+ 正解回代校验 + 关节限位 | ✅ 完成 |
+| 18 路舵机映射与 42 字节串口帧 | ✅ 完成 |
+| 串口驱动（断线重连、dry-run 开关） | ✅ 完成 |
+| 单元测试（12 个文件） | ✅ 见下节 |
+| RViz 仿真行走 | ✅ 有录屏 |
+| **单腿实机验证** | ✅ 2026-11 通过 |
+| **整机 18 路标定** | ⬜ 仅单腿 3 路完成 |
+| **整机实机行走** | ⬜ 未开始 |
+| 地面工况（打滑、触地检测、质心偏移） | ⬜ 未开始 |
+
+> 界定：**单腿实机可用 ≠ 整机可走**。当前只能称为「仿真链路完整 + 单腿实机验证通过」。
+
+---
+
+## 测试记录
+
+`leg_calc` 包下 12 个 gtest 文件，覆盖：
+
+| 测试 | 覆盖内容 |
+|---|---|
+| `test_leg_chain` | 逆解链路与正解回代一致性 |
+| `test_leg_kinematics` | 单腿运动学 |
+| `test_leg_layout` | 腿座布局与安装位置 |
+| `test_servo18_mapper` | 18 路舵机通道映射 |
+| `test_foot_trajectory` | 足端轨迹生成 |
+| `test_gait_phase_manager` | 步态相位推进 |
+| `test_gait_config_loader` | 步态参数加载 |
+| `test_velocity_smoother` | 速度平滑器 |
+| `test_odometry_integrator` | 里程计积分 |
+| `test_command_watchdog` | 命令超时看门狗 |
+| `test_common_types` / `test_gait_types` | 基础类型 |
+
+```bash
+colcon test --packages-select leg_calc
+colcon test-result --all
+```
+
+---
+
+## 已知限制
+
+- **只有单腿接了舵机**：其余 15 路通道的标定值仍为默认，换舵机/换腿需重新标定
+- **无触地检测**：足端高度靠运动学假设，真实地面起伏未处理
+- **无打滑处理**：步态相位由时间驱动，不是由实际触地反馈驱动
+- **目标速度无闭环**：`cmd_vel` 直接映射到步长，尚无里程计速度反馈
+- **步态只在启动时选择**：运行中切换需重启节点
+- 项目依赖 conda/ROS 混装环境的 `PYTHONPATH` 处理，未做容器化
+- 机械模型来自团队图纸，装配公差未在软件侧补偿
+
+---
+
+## 许可
+
+代码部分采用 MIT（见 `LICENSE`）。`src/spider/model/` 下的 STL 与 URDF 参数来自团队机械图纸，
+不在本许可范围内，仅用于本项目的仿真与展示。
